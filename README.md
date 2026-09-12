@@ -94,3 +94,22 @@
 ## 📄 开源许可证
 
 本项目采用宽松的 [MIT License](LICENSE) 开源，任何人均可自由用于个人学习、修改或商业用途。
+
+
+---
+
+## 🔍 深度技术剖析：为什么 Steam 等软件限制单个 exe 不够？为什么下载限速表现不同？
+
+### 1. 现代软件的多进程架构（父子进程与下载引擎）
+现代大型软件早已不再是单一进程模式：
+- **Steam**：`steam.exe` 本身仅作为客户端主框架和登录通道（连接 27024 等控制端口）；而海量游戏数据分发（CDN 流量）是由其内部的 **`steamwebhelper.exe`** 以及 `steamservice.exe` 通过并发 HTTP/HTTPS (443端口) 甚至 WebSocket / QUIC 协议直接拉取的。
+- **网盘与下载器**：百度网盘的实际下载由 `baidunetdiskhost.exe` 承担；迅雷由 `downloadsdkserver.exe` 承担。
+- **本工具解决方案**：已内置**进程家族智能联动引擎 (Associated Processes Engine)**。当您选中限制或阻断 `steam.exe` 时，工具会自动将其关联的所有核心下载与工作子进程（`steamwebhelper.exe`、`steamservice.exe` 等）**全部一并下发策略**！
+
+### 2. Windows 原生 QoS 机制的真实机理（上传 vs 下载）
+- **上传限速 (Upload)**：Windows 原生 QoS (`New-NetQosPolicy`) 属于内核级出站流量整形（Egress Shaper），能对指定进程发送向外的字节流实施硬性封顶，表现极为稳定强劲。
+- **完全断开连接 (Block)**：联动 Windows 高级安全防火墙出入站双向规则，实现 100% 毫秒级彻底阻断。
+- **下载限速 (Download)**：
+  - Windows 原生系统并不提供类似 Linux `tc ingress` 的用户态原生“下行字节硬性截流队列”（商业软件如 NetLimiter 是通过安装自研的底层 NDIS / WFP 内核驱动 `nlwfp.sys` 在驱动层强行丢包截断）。
+  - 在纯 Windows 原生无第三方驱动环境下，本工具通过 QoS 精确限制出站流与 TCP ACK 反馈节奏，促使常规单连接 TCP 服务端自动降速。但若应用使用多线程并发 CDN、或者您开启了 **TUN 虚拟网卡 / 游戏加速器 / 代理工具**（流量被虚拟网卡拦截转送），下行数据包可能会绕过物理网卡的 QoS 整形。
+  - **测试与断网建议**：若想彻底阻止某应用占用网络或进行断流测试，强烈推荐选择 **`完全断开连接 (0 KB/s)`**，此模式下无论 CDN 还是多进程均会瞬间被防火墙彻底阻断！

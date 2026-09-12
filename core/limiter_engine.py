@@ -15,6 +15,18 @@ from core.uac_manager import run_powershell_script
 QOS_PREFIX = "NetLimit_QoS_"
 FW_PREFIX = "NetLimit_Block_"
 
+# 核心网络程序及其关联的工作子进程/下载引擎进程
+# 许多现代软件 (如 Steam、百度网盘、迅雷) 的实际下载流量并不由主界面进程承载，
+# 而是由其专用的下载宿主服务与 Helper 进程进行多线程流媒体传输。
+ASSOCIATED_PROCESSES = {
+    "steam.exe": ["steamwebhelper.exe", "steamservice.exe"],
+    "baidunetdisk.exe": ["baidunetdiskhost.exe"],
+    "thunder.exe": ["downloadsdkserver.exe", "xunlei.exe"],
+    "epicgameslauncher.exe": ["epicwebhelper.exe"],
+    "wechat.exe": ["wechatappex.exe"],
+    "qq.exe": ["qqprotect.exe"],
+}
+
 @dataclass
 class PolicyStatus:
     app_name: str
@@ -187,8 +199,17 @@ class LimiterEngine:
             "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\QoS' -Name 'Do not use NLA' -Value '1' -Type String -Force"
         ]
 
+        # 自动展开关联子进程 (例如限速 steam.exe 时，自动将实际负责下载连接的 steamwebhelper.exe 与 steamservice.exe 一并纳入策略)
+        expanded_targets = []
         for req in requests:
             clean_app = req.app_name.strip()
+            app_lower = clean_app.lower()
+            expanded_targets.append((clean_app, req.app_path, req))
+            if app_lower in ASSOCIATED_PROCESSES:
+                for sub_app in ASSOCIATED_PROCESSES[app_lower]:
+                    expanded_targets.append((sub_app, "", req))
+
+        for clean_app, app_path, req in expanded_targets:
             safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
             
             up_bps = self.speed_str_to_bps(req.upload_speed_type, req.custom_upload_val, req.custom_upload_unit)
@@ -231,7 +252,14 @@ New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Direction Inbound 
             return True, "未指定程序", 0
 
         commands = []
+        # 自动展开关联子进程一并解除
+        all_apps = list(app_names)
         for app in app_names:
+            app_lower = app.strip().lower()
+            if app_lower in ASSOCIATED_PROCESSES:
+                all_apps.extend(ASSOCIATED_PROCESSES[app_lower])
+
+        for app in set(all_apps):
             clean_app = app.strip()
             safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
             commands.append(f"""
