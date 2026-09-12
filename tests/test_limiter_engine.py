@@ -27,6 +27,7 @@ class TestLimiterEngine(unittest.TestCase):
         self.assertIn("steamwebhelper.exe", ASSOCIATED_PROCESSES["steam.exe"])
         self.assertIn("baidunetdisk.exe", ASSOCIATED_PROCESSES)
         self.assertIn("baidunetdiskhost.exe", ASSOCIATED_PROCESSES["baidunetdisk.exe"])
+        self.assertIn("baidunetdiskunite.exe", ASSOCIATED_PROCESSES["baidunetdisk.exe"])
         self.assertIn("thunder.exe", ASSOCIATED_PROCESSES)
         self.assertIn("downloadsdkserver.exe", ASSOCIATED_PROCESSES["thunder.exe"])
 

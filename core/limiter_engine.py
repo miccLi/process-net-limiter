@@ -20,8 +20,8 @@ FW_PREFIX = "NetLimit_Block_"
 # 而是由其专用的下载宿主服务与 Helper 进程进行多线程流媒体传输。
 ASSOCIATED_PROCESSES = {
     "steam.exe": ["steamwebhelper.exe", "steamservice.exe"],
-    "baidunetdisk.exe": ["baidunetdiskhost.exe"],
-    "thunder.exe": ["downloadsdkserver.exe", "xunlei.exe"],
+    "baidunetdisk.exe": ["baidunetdiskhost.exe", "baidunetdiskunite.exe"],
+    "thunder.exe": ["downloadsdkserver.exe", "xunlei.exe", "xlserviceplatform.exe"],
     "epicgameslauncher.exe": ["epicwebhelper.exe"],
     "wechat.exe": ["wechatappex.exe"],
     "qq.exe": ["qqprotect.exe"],
@@ -49,6 +49,23 @@ class LimitRequest:
 class LimiterEngine:
     def __init__(self):
         pass
+
+    @staticmethod
+    def get_process_exe_path(proc_name: str) -> str:
+        """动态查找正在运行的指定进程的完整可执行文件路径"""
+        proc_name_lower = proc_name.strip().lower()
+        try:
+            import psutil
+            for p in psutil.process_iter(['name', 'exe']):
+                try:
+                    if p.info['name'] and p.info['name'].lower() == proc_name_lower:
+                        if p.info['exe'] and os.path.exists(p.info['exe']):
+                            return p.info['exe']
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception:
+            pass
+        return ""
 
     @staticmethod
     def speed_str_to_bps(speed_type: str, custom_val: float = 0, unit: str = "KB/s") -> int:
@@ -199,15 +216,17 @@ class LimiterEngine:
             "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\QoS' -Name 'Do not use NLA' -Value '1' -Type String -Force"
         ]
 
-        # 自动展开关联子进程 (例如限速 steam.exe 时，自动将实际负责下载连接的 steamwebhelper.exe 与 steamservice.exe 一并纳入策略)
+        # 自动展开关联子进程并解析其真实执行路径 (例如限速 steam.exe 时，自动将实际负责下载连接的 steamwebhelper.exe 一并纳入策略并绑定真实路径)
         expanded_targets = []
         for req in requests:
             clean_app = req.app_name.strip()
             app_lower = clean_app.lower()
-            expanded_targets.append((clean_app, req.app_path, req))
+            main_path = req.app_path or self.get_process_exe_path(clean_app)
+            expanded_targets.append((clean_app, main_path, req))
             if app_lower in ASSOCIATED_PROCESSES:
                 for sub_app in ASSOCIATED_PROCESSES[app_lower]:
-                    expanded_targets.append((sub_app, "", req))
+                    sub_path = self.get_process_exe_path(sub_app)
+                    expanded_targets.append((sub_app, sub_path, req))
 
         for clean_app, app_path, req in expanded_targets:
             safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
@@ -223,9 +242,9 @@ Remove-NetQosPolicy -Name '{QOS_PREFIX}{safe_name}' -Confirm:$false -ErrorAction
 Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}*' -ErrorAction SilentlyContinue
             """)
 
-            # 检查是否为“完全断开连接”
+            # 检查是否为“完全断开连接” (使用 Windows 内核防火墙强力阻断入站与出站)
             if req.upload_speed_type == "block" or req.download_speed_type == "block":
-                prog_arg = f"-Program '{req.app_path}'" if (req.app_path and os.path.exists(req.app_path)) else ""
+                prog_arg = f"-Program '{app_path}'" if (app_path and os.path.exists(app_path)) else ""
                 commands.append(f"""
 New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_Out' -Direction Outbound -Action Block {prog_arg} -Description 'ProcessNetLimiter 阻断规则' -ErrorAction SilentlyContinue | Out-Null
 New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Direction Inbound -Action Block {prog_arg} -Description 'ProcessNetLimiter 阻断规则' -ErrorAction SilentlyContinue | Out-Null

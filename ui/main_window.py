@@ -259,6 +259,13 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self.reset_all_btn)
 
         ctrl_layout.addLayout(settings_row)
+
+        # 原理与机制温馨提示
+        tip_label = QLabel("💡 提示：'完全断开连接'通过防火墙彻底阻断网络(100%生效)；下载限速基于系统QoS出站ACK调控，若Steam/百度网盘等多线程下载器并发流极多或开启了加速器/TUN，建议优先使用其内置下载限速。")
+        tip_label.setStyleSheet("color: #718096; font-size: 11px; padding-top: 2px;")
+        tip_label.setWordWrap(True)
+        ctrl_layout.addWidget(tip_label)
+
         main_layout.addWidget(control_card)
 
         # 5. 底部状态栏
