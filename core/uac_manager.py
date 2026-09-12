@@ -21,16 +21,17 @@ def restart_as_admin() -> bool:
     if is_admin():
         return True
     try:
-        # 获取当前运行的 python 脚本和参数
         script = os.path.abspath(sys.argv[0])
+        script_dir = os.path.dirname(script)
         params = ' '.join([f'"{arg}"' for arg in sys.argv[1:]])
+        
         # 使用 ShellExecuteW 请求 UAC 提权
         ret = ctypes.windll.shell32.ShellExecuteW(
             None,
             "runas",
             sys.executable,
             f'"{script}" {params}'.strip(),
-            None,
+            script_dir,
             1  # SW_SHOWNORMAL
         )
         if ret > 32:
