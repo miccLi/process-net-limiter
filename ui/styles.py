@@ -210,19 +210,25 @@ QPushButton#FilterChip {
     background-color: #171b22;
     border: 1px solid #28303d;
     border-radius: 15px;
-    padding: 4px 12px;
+    padding: 5px 14px;
     font-size: 12px;
     color: #94a3b8;
 }
 QPushButton#FilterChip:hover {
     background-color: #242c38;
+    border-color: #3b4657;
     color: #f1f5f9;
 }
-QPushButton#FilterChip[checked="true"] {
-    background-color: #1e3a8a;
-    border-color: #3b82f6;
-    color: #93c5fd;
+QPushButton#FilterChip:checked {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1d4ed8, stop:1 #2563eb);
+    border: 1px solid #60a5fa;
+    color: #ffffff;
     font-weight: bold;
+}
+QPushButton#FilterChip:checked:hover {
+    background: #3b82f6;
+    border-color: #93c5fd;
+    color: #ffffff;
 }
 
 /* 表格组件 */
