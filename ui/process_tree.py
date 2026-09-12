@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-多级进程家族树组件 (ProcessTreeWidget)
+多级进程家族树组件 (ProcessTreeWidget - 轻量丝滑版)
 类似 Windows 任务管理器的折叠树状结构：
-- 第一级：进程家族 (可折叠展开，聚合全家族实时上下行网速、连接数与限速状态)
-- 第二级：家族子进程 (展示具体 PID、独立网速与路径)
-- 优化的列排布：有用的信息排在最前，路径排最后
-- 智能勾选联动：勾选家族全选子进程，也可仅勾选某一特定子进程
+- 第一级：进程家族 (聚合总连接数与限速状态，支持折叠展开)
+- 第二级：家族子进程 (展示具体 PID 与执行文件路径)
+- 清爽高效的列排布：复选框 -> 程序名称 -> 限制状态 (醒目前置) -> PID -> 类别 -> 网络连接 -> 执行文件路径 (排最后)
+- 性能极致优化，无冗余轮询，响应秒级即达
 """
 from PyQt5.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QHeaderView, QAbstractItemView, QCheckBox, QWidget, QHBoxLayout
@@ -13,18 +13,15 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from core.process_scanner import ProcessFamily, ProcessItem, ProcessCategory
-from core.speed_monitor import SpeedMonitor
 
-# 列定义 (按重要性排序：有用排前面，路径排最后)
+# 列定义：将最有用的信息排在前面，路径排在最右侧
 COL_CHECK = 0       # 复选框
 COL_NAME = 1        # 程序名称 / 进程家族
-COL_DOWN_SPEED = 2  # 实时下载速度 (有用)
-COL_UP_SPEED = 3    # 实时上传速度 (有用)
-COL_STATUS = 4      # 当前限制状态 (有用)
-COL_PID = 5         # PID
-COL_CATEGORY = 6    # 类别徽章
-COL_CONNS = 7       # 网络连接
-COL_PATH = 8        # 执行文件路径 (排在最后)
+COL_STATUS = 2      # 当前限制状态 (前置核心列)
+COL_PID = 3         # PID
+COL_CATEGORY = 4    # 类别徽章
+COL_CONNS = 5       # 网络连接
+COL_PATH = 6        # 执行文件路径 (排在最后)
 
 class ProcessTreeWidget(QTreeWidget):
     selectionChangedCustom = pyqtSignal(int)
@@ -41,9 +38,7 @@ class ProcessTreeWidget(QTreeWidget):
         headers = [
             "",
             "程序名称 / 进程家族",
-            "下载速度 ⬇️",
-            "上传速度 ⬆️",
-            "限制状态",
+            "当前限制状态",
             "PID",
             "类别",
             "网络连接",
@@ -55,27 +50,23 @@ class ProcessTreeWidget(QTreeWidget):
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.setRootIsDecorated(True)  # 显示可折叠展开箭头
+        self.setRootIsDecorated(True)
         self.setAnimated(True)
 
         header = self.header()
         header.setSectionResizeMode(COL_CHECK, QHeaderView.Fixed)
         self.setColumnWidth(COL_CHECK, 42)
         header.setSectionResizeMode(COL_NAME, QHeaderView.Interactive)
-        self.setColumnWidth(COL_NAME, 240)
-        header.setSectionResizeMode(COL_DOWN_SPEED, QHeaderView.Interactive)
-        self.setColumnWidth(COL_DOWN_SPEED, 105)
-        header.setSectionResizeMode(COL_UP_SPEED, QHeaderView.Interactive)
-        self.setColumnWidth(COL_UP_SPEED, 105)
+        self.setColumnWidth(COL_NAME, 260)
         header.setSectionResizeMode(COL_STATUS, QHeaderView.Interactive)
-        self.setColumnWidth(COL_STATUS, 150)
+        self.setColumnWidth(COL_STATUS, 160)
         header.setSectionResizeMode(COL_PID, QHeaderView.Interactive)
         self.setColumnWidth(COL_PID, 80)
         header.setSectionResizeMode(COL_CATEGORY, QHeaderView.Interactive)
-        self.setColumnWidth(COL_CATEGORY, 100)
+        self.setColumnWidth(COL_CATEGORY, 110)
         header.setSectionResizeMode(COL_CONNS, QHeaderView.Interactive)
-        self.setColumnWidth(COL_CONNS, 90)
-        header.setSectionResizeMode(COL_PATH, QHeaderView.Stretch)  # 路径排最后并自动延伸
+        self.setColumnWidth(COL_CONNS, 95)
+        header.setSectionResizeMode(COL_PATH, QHeaderView.Stretch)
 
         self.itemClicked.connect(self._on_item_clicked)
 
@@ -85,7 +76,6 @@ class ProcessTreeWidget(QTreeWidget):
         checked_fams = set()
         expanded_fams = set()
 
-        # 记录现存的状态
         for fam in self.families_data:
             if fam.selected:
                 checked_fams.add(fam.family_id)
@@ -93,7 +83,6 @@ class ProcessTreeWidget(QTreeWidget):
                 if child.selected:
                     checked_pids.add(child.pid)
 
-        # 记录界面上哪些家族当前是展开的
         for i in range(self.topLevelItemCount()):
             item = self.topLevelItem(i)
             fam_id = item.data(0, Qt.UserRole)
@@ -102,7 +91,6 @@ class ProcessTreeWidget(QTreeWidget):
 
         self.families_data = families
 
-        # 恢复状态
         for fam in self.families_data:
             fam.selected = (fam.family_id in checked_fams)
             for child in fam.children:
@@ -165,27 +153,7 @@ class ProcessTreeWidget(QTreeWidget):
             if fam.is_limited:
                 fam_item.setForeground(COL_NAME, QColor("#f87171"))
 
-            # 下载速度 (Column 2)
-            dl_str = SpeedMonitor.format_speed(fam.total_download_speed)
-            fam_item.setText(COL_DOWN_SPEED, dl_str)
-            fam_item.setTextAlignment(COL_DOWN_SPEED, Qt.AlignCenter)
-            if fam.total_download_speed > 1024:
-                fam_item.setForeground(COL_DOWN_SPEED, QColor("#38bdf8"))  # 亮青色
-                fam_item.setFont(COL_DOWN_SPEED, bold_font)
-            else:
-                fam_item.setForeground(COL_DOWN_SPEED, QColor("#94a3b8"))
-
-            # 上传速度 (Column 3)
-            up_str = SpeedMonitor.format_speed(fam.total_upload_speed)
-            fam_item.setText(COL_UP_SPEED, up_str)
-            fam_item.setTextAlignment(COL_UP_SPEED, Qt.AlignCenter)
-            if fam.total_upload_speed > 1024:
-                fam_item.setForeground(COL_UP_SPEED, QColor("#a78bfa"))  # 亮紫色
-                fam_item.setFont(COL_UP_SPEED, bold_font)
-            else:
-                fam_item.setForeground(COL_UP_SPEED, QColor("#94a3b8"))
-
-            # 限制状态 (Column 4)
+            # 限制状态 (Column 2 - 前置展示)
             fam_item.setText(COL_STATUS, fam.limit_summary)
             if fam.is_limited:
                 fam_item.setFont(COL_STATUS, bold_font)
@@ -193,18 +161,18 @@ class ProcessTreeWidget(QTreeWidget):
             else:
                 fam_item.setForeground(COL_STATUS, QColor("#64748b"))
 
-            # PID (Column 5)
+            # PID (Column 3)
             pid_text = f"共 {len(fam.children)}" if len(fam.children) > 1 else str(fam.children[0].pid if fam.children else "")
             fam_item.setText(COL_PID, pid_text)
             fam_item.setTextAlignment(COL_PID, Qt.AlignCenter)
             fam_item.setForeground(COL_PID, QColor("#94a3b8"))
 
-            # 类别 (Column 6)
+            # 类别 (Column 4)
             fam_item.setText(COL_CATEGORY, fam.category.display_name)
             fam_item.setTextAlignment(COL_CATEGORY, Qt.AlignCenter)
             fam_item.setForeground(COL_CATEGORY, QColor(fam.category.color))
 
-            # 网络连接 (Column 7)
+            # 网络连接 (Column 5)
             conn_str = f"{fam.total_connections} 个" if fam.total_connections > 0 else "—"
             fam_item.setText(COL_CONNS, conn_str)
             fam_item.setTextAlignment(COL_CONNS, Qt.AlignCenter)
@@ -213,70 +181,50 @@ class ProcessTreeWidget(QTreeWidget):
             else:
                 fam_item.setForeground(COL_CONNS, QColor("#64748b"))
 
-            # 路径 (Column 8 - 排最后)
+            # 执行文件路径 (Column 6 - 排在最后)
             path_str = fam.children[0].exe_path if fam.children else ""
             fam_item.setText(COL_PATH, path_str)
             fam_item.setToolTip(COL_PATH, path_str)
             fam_item.setForeground(COL_PATH, QColor("#64748b"))
 
-            # 如果该家族有多个进程，创建二级详细子节点
+            # 二级详细子进程节点
             if len(fam.children) > 1:
                 for child in fam.children:
                     child_item = QTreeWidgetItem(fam_item)
                     child_item.setData(0, Qt.UserRole, child.pid)
 
-                    # 子项复选框
                     child_cb = QCheckBox()
                     child_cb.setChecked(child.selected)
                     child_cb.stateChanged.connect(lambda state, c=child, f=fam, p_item=fam_item: self._on_child_checkbox_changed(c, f, p_item, state))
                     self.setItemWidget(child_item, COL_CHECK, self._wrap_checkbox(child_cb))
 
-                    # 子进程名称
                     child_item.setText(COL_NAME, f"↳ {child.name}")
                     if child.is_limited:
                         child_item.setForeground(COL_NAME, QColor("#f87171"))
 
-                    # 子进程下载速度
-                    c_dl_str = SpeedMonitor.format_speed(child.download_speed)
-                    child_item.setText(COL_DOWN_SPEED, c_dl_str)
-                    child_item.setTextAlignment(COL_DOWN_SPEED, Qt.AlignCenter)
-                    child_item.setForeground(COL_DOWN_SPEED, QColor("#38bdf8" if child.download_speed > 1024 else "#64748b"))
-
-                    # 子进程上传速度
-                    c_up_str = SpeedMonitor.format_speed(child.upload_speed)
-                    child_item.setText(COL_UP_SPEED, c_up_str)
-                    child_item.setTextAlignment(COL_UP_SPEED, Qt.AlignCenter)
-                    child_item.setForeground(COL_UP_SPEED, QColor("#a78bfa" if child.upload_speed > 1024 else "#64748b"))
-
-                    # 子进程限制状态
                     child_item.setText(COL_STATUS, child.limit_summary)
                     if child.is_limited:
                         child_item.setForeground(COL_STATUS, QColor("#fbbf24" if "KB/s" in child.limit_summary else "#f87171"))
                     else:
                         child_item.setForeground(COL_STATUS, QColor("#64748b"))
 
-                    # 子项具体 PID
                     child_item.setText(COL_PID, str(child.pid))
                     child_item.setTextAlignment(COL_PID, Qt.AlignCenter)
                     child_item.setForeground(COL_PID, QColor("#cbd5e1"))
 
-                    # 子项类别
                     child_item.setText(COL_CATEGORY, child.category.display_name)
                     child_item.setTextAlignment(COL_CATEGORY, Qt.AlignCenter)
                     child_item.setForeground(COL_CATEGORY, QColor(child.category.color))
 
-                    # 子项连接数
                     child_conn = f"{child.connections_count} 个" if child.connections_count > 0 else "—"
                     child_item.setText(COL_CONNS, child_conn)
                     child_item.setTextAlignment(COL_CONNS, Qt.AlignCenter)
                     child_item.setForeground(COL_CONNS, QColor("#38bdf8" if child.connections_count > 0 else "#64748b"))
 
-                    # 子项路径 (排最后)
                     child_item.setText(COL_PATH, child.exe_path)
                     child_item.setToolTip(COL_PATH, child.exe_path)
                     child_item.setForeground(COL_PATH, QColor("#94a3b8"))
 
-            # 恢复展开状态
             if expanded_fams and fam.family_id in expanded_fams:
                 fam_item.setExpanded(True)
 
@@ -295,7 +243,6 @@ class ProcessTreeWidget(QTreeWidget):
         fam.selected = is_checked
         for child in fam.children:
             child.selected = is_checked
-        # 更新界面上所有子节点的复选框
         for i in range(fam_item.childCount()):
             child_item = fam_item.child(i)
             widget = self.itemWidget(child_item, COL_CHECK)
@@ -309,10 +256,7 @@ class ProcessTreeWidget(QTreeWidget):
 
     def _on_child_checkbox_changed(self, child: ProcessItem, fam: ProcessFamily, fam_item: QTreeWidgetItem, state: int):
         child.selected = (state == Qt.Checked)
-        # 如果所有子节点都被选中，父级选中；如果有任一未选中，父级不全选
-        all_checked = all(c.selected for c in fam.children)
-        any_checked = any(c.selected for c in fam.children)
-        fam.selected = any_checked
+        fam.selected = any(c.selected for c in fam.children)
 
         fam_widget = self.itemWidget(fam_item, COL_CHECK)
         if fam_widget:
@@ -324,7 +268,6 @@ class ProcessTreeWidget(QTreeWidget):
         self._emit_selected_count()
 
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
-        # 点击行直接切换复选框勾选
         widget = self.itemWidget(item, COL_CHECK)
         if widget:
             cb = widget.findChild(QCheckBox)
@@ -346,10 +289,6 @@ class ProcessTreeWidget(QTreeWidget):
         self._render_tree()
 
     def get_selected_targets(self) -> list[tuple[str, str]]:
-        """
-        获取用户选中的具体限速目标列表 [(app_name, exe_path)]。
-        如果家族整体被勾选，提取家族下所有不同的程序名；如果只勾选了某个子进程，只提取该子进程。
-        """
         targets = {}
         for fam in self.families_data:
             for child in fam.children:

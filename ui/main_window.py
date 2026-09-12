@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-主窗口界面逻辑 (升级版)
+主窗口界面逻辑 (轻量高响应版)
 - 任务管理器风格的进程家族树状列表 (折叠展开、父子多级复选)
-- 实时网速采样监控 (实时下行/上行网速流式展示)
+- 极致轻量响应：无卡顿、无冗余定时器负载
 - 优化的重要列排布 (有用信息在前，路径排最后)
 - 批量合并下发 QoS 策略与防火墙规则
-- UAC 状态检测与提权
+- UAC 状态检测与自动提权
 """
 import os
 import sys
@@ -18,7 +18,6 @@ from PyQt5.QtCore import Qt, QTimer
 
 from core.uac_manager import is_admin, restart_as_admin
 from core.limiter_engine import LimiterEngine, LimitRequest
-from core.speed_monitor import SpeedMonitor
 from core.process_scanner import scan_and_group_processes, ProcessFamily
 from ui.process_tree import ProcessTreeWidget
 from ui.styles import DARK_THEME_QSS
@@ -27,18 +26,12 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.engine = LimiterEngine()
-        self.speed_monitor = SpeedMonitor()
         self.current_filter_category = "ALL"
         self._init_window()
         self._init_ui()
         self.refresh_processes()
 
-        # 实时网速定时采样更新定时器 (每 1.5 秒采样更新一次实时网速)
-        self.speed_timer = QTimer(self)
-        self.speed_timer.timeout.connect(self._on_speed_tick)
-        self.speed_timer.start(1500)
-
-        # 自动重扫进程定时器 (默认 5 秒重扫一次进程树)
+        # 自动刷新定时器 (可选开启，默认每 5 秒刷新一次进程列表)
         self.scan_timer = QTimer(self)
         self.scan_timer.timeout.connect(self._on_auto_refresh)
         if self.auto_refresh_cb.isChecked():
@@ -46,8 +39,8 @@ class MainWindow(QMainWindow):
 
     def _init_window(self):
         self.setWindowTitle("进程网络限速助手 (ProcessNetLimiter) - 专业版")
-        self.resize(1120, 740)
-        self.setMinimumSize(880, 600)
+        self.resize(1080, 720)
+        self.setMinimumSize(850, 580)
         self.setStyleSheet(DARK_THEME_QSS)
 
     def _init_ui(self):
@@ -276,8 +269,7 @@ class MainWindow(QMainWindow):
     def refresh_processes(self):
         """重新扫描进程家族与活动策略"""
         policies = self.engine.get_active_policies()
-        speeds = self.speed_monitor.update_and_get_speeds()
-        families = scan_and_group_processes(policies, speeds)
+        families = scan_and_group_processes(policies)
         self.tree.update_data(families)
 
         total_procs = sum(len(f.children) for f in families)
@@ -286,13 +278,6 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(
             f"已刷新 | 进程家族: {len(families)} | 总进程数: {total_procs} | 联网家族: {active_conn_count} | 已限制: {limited_count}"
         )
-
-    def _on_speed_tick(self):
-        """定期采样实时网速并静默刷新树状视图"""
-        speeds = self.speed_monitor.update_and_get_speeds()
-        policies = self.engine.get_active_policies()
-        families = scan_and_group_processes(policies, speeds)
-        self.tree.update_data(families)
 
     def _on_auto_refresh(self):
         self.refresh_processes()

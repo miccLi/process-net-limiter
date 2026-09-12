@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-进程扫描与进程家族智能树状分组引擎
-- 扫描系统当前运行进程与实时网速
+进程扫描与进程家族智能树状分组引擎 (性能极致优化版)
+- 纯净、轻量、高响应速度，无高频 I/O 轮询负载
 - 进程家族 (Process Family) 聚合：类似 Windows 任务管理器的父子多级折叠菜单
 - 优先级排序：被限速家族置顶 > 下载器 > 网盘 > 游戏 > 活跃网络家族 > 普通后台
 """
@@ -11,7 +11,6 @@ import psutil
 from dataclasses import dataclass, field
 from enum import Enum
 from core.limiter_engine import PolicyStatus
-from core.speed_monitor import ProcessSpeed
 
 class ProcessCategory(Enum):
     DOWNLOADER = ("下载器", "⚡", "#8b5cf6", 1)
@@ -98,8 +97,6 @@ class ProcessItem:
     is_limited: bool
     limit_summary: str
     sort_priority: int
-    download_speed: float = 0.0
-    upload_speed: float = 0.0
     selected: bool = False
 
 @dataclass
@@ -111,8 +108,6 @@ class ProcessFamily:
     is_limited: bool = False
     limit_summary: str = "正常"
     total_connections: int = 0
-    total_download_speed: float = 0.0
-    total_upload_speed: float = 0.0
     sort_priority: int = 6
     selected: bool = False
 
@@ -130,16 +125,10 @@ def classify_process(name: str, exe_path: str) -> ProcessCategory:
         return ProcessCategory.BROWSER_SOCIAL
     return ProcessCategory.OTHER
 
-def scan_and_group_processes(
-    active_policies: dict[str, PolicyStatus],
-    speeds: dict[int, ProcessSpeed] = None
-) -> list[ProcessFamily]:
+def scan_and_group_processes(active_policies: dict[str, PolicyStatus]) -> list[ProcessFamily]:
     """
-    扫描当前系统中所有运行的进程，聚合其实时网速与网络连接，并分组为任务管理器式进程家族树。
+    轻量、极速扫描当前系统中所有运行的进程并分组为任务管理器式进程家族树。
     """
-    if speeds is None:
-        speeds = {}
-
     connections_by_pid: dict[int, int] = {}
     try:
         for c in psutil.net_connections(kind="inet"):
@@ -162,11 +151,6 @@ def scan_and_group_processes(
             name = proc.info.get("name") or f"Process_{pid}"
             exe_path = proc.info.get("exe") or ""
             conn_count = connections_by_pid.get(pid, 0)
-
-            # 提取实时网速
-            pspeed = speeds.get(pid)
-            dl_speed = pspeed.download_bytes_per_sec if pspeed else 0.0
-            up_speed = pspeed.upload_bytes_per_sec if pspeed else 0.0
 
             # 限速策略查询 (安全防 None)
             name_lower = name.lower()
@@ -191,13 +175,11 @@ def scan_and_group_processes(
                 connections_count=conn_count,
                 is_limited=is_limited,
                 limit_summary=limit_summary,
-                sort_priority=category.priority,
-                download_speed=dl_speed,
-                upload_speed=up_speed
+                sort_priority=category.priority
             ))
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
-        except Exception as e:
+        except Exception:
             continue
 
     # 2. 聚合到进程家族 (Process Families)
@@ -208,7 +190,6 @@ def scan_and_group_processes(
         if name_lower in KNOWN_FAMILIES:
             fam_id, fam_name = KNOWN_FAMILIES[name_lower]
         else:
-            # 通用聚类：去掉 .exe 作为家族名
             base_name = re.sub(r'\.exe$', '', item.name, flags=re.IGNORECASE)
             fam_id = base_name.lower()
             fam_name = base_name
@@ -232,8 +213,6 @@ def scan_and_group_processes(
     family_list: list[ProcessFamily] = []
     for fam in families_dict.values():
         fam.total_connections = sum(c.connections_count for c in fam.children)
-        fam.total_download_speed = sum(c.download_speed for c in fam.children)
-        fam.total_upload_speed = sum(c.upload_speed for c in fam.children)
         
         # 家族限速判定
         limited_children = [c for c in fam.children if c.is_limited]
@@ -254,19 +233,18 @@ def scan_and_group_processes(
             fam.sort_priority = 3
         elif fam.category == ProcessCategory.BROWSER_SOCIAL:
             fam.sort_priority = 4
-        elif fam.total_connections > 0 or fam.total_download_speed > 100 or fam.total_upload_speed > 100:
+        elif fam.total_connections > 0:
             fam.sort_priority = 5
         else:
             fam.sort_priority = 6
 
         # 子进程内部排序 (按连接数降序、PID升序)
-        fam.children.sort(key=lambda c: (-c.connections_count, -c.download_speed, c.pid))
+        fam.children.sort(key=lambda c: (-c.connections_count, c.pid))
         family_list.append(fam)
 
-    # 家族列表排序：优先级升序 -> 总网速降序 -> 总连接数降序 -> 名称
+    # 家族列表排序：优先级升序 -> 总连接数降序 -> 名称
     family_list.sort(key=lambda f: (
         f.sort_priority,
-        -(f.total_download_speed + f.total_upload_speed),
         -f.total_connections,
         f.display_name.lower()
     ))
