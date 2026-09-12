@@ -151,7 +151,6 @@ QCheckBox::indicator:hover {
 QCheckBox::indicator:checked {
     background-color: #2563eb;
     border-color: #3b82f6;
-    image: url(""); /* Qt 默认绘制勾选 */
 }
 
 /* 按钮通用设计 */
@@ -231,15 +230,25 @@ QPushButton#FilterChip:checked:hover {
     color: #ffffff;
 }
 
-/* 表格组件 */
-QTableWidget {
+/* 树状组件样式 (QTreeWidget - 任务管理器样式) */
+QTreeWidget {
     background-color: #13171d;
     alternate-background-color: #171c23;
     border: 1px solid #28303d;
     border-radius: 8px;
-    gridline-color: #212732;
     selection-background-color: #1e3a8a;
     selection-color: #ffffff;
+}
+QTreeWidget::item {
+    height: 34px;
+    border-bottom: 1px solid #1a212b;
+}
+QTreeWidget::item:hover {
+    background-color: #1f2733;
+}
+QTreeWidget::item:selected {
+    background-color: #1e3a8a;
+    color: #ffffff;
 }
 QHeaderView::section {
     background-color: #171b22;
@@ -248,10 +257,6 @@ QHeaderView::section {
     padding: 6px;
     border: none;
     border-bottom: 2px solid #28303d;
-}
-QTableCornerButton::section {
-    background-color: #171b22;
-    border: none;
 }
 
 /* 滚动条 */
@@ -269,7 +274,22 @@ QScrollBar::handle:vertical {
 QScrollBar::handle:vertical:hover {
     background: #475569;
 }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+QScrollBar:horizontal {
+    border: none;
+    background: #0f1217;
+    height: 8px;
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal {
+    background: #333d4b;
+    min-width: 25px;
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #475569;
+}
+QScrollBar::add-line, QScrollBar::sub-line {
+    width: 0px;
     height: 0px;
 }
 """

@@ -22,3 +22,6 @@ Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 *.log
+
+# Local Agent Documentation (Not pushed to remote)
+AGENTS.md

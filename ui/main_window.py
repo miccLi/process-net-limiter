@@ -1,48 +1,53 @@
 # -*- coding: utf-8 -*-
 """
-主窗口界面逻辑
-实现：
-- 进程列表实时渲染与置顶展示
-- 搜索与多维度分类筛选
-- 上传与下载独立或同步限速设置（完全断开、1KB/s, 100KB/s, 1000KB/s, 自定义）
-- 批量多选、一键应用、取消选中、一键解除所有限制
-- UAC 状态栏与一键提权
+主窗口界面逻辑 (升级版)
+- 任务管理器风格的进程家族树状列表 (折叠展开、父子多级复选)
+- 实时网速采样监控 (实时下行/上行网速流式展示)
+- 优化的重要列排布 (有用信息在前，路径排最后)
+- 批量合并下发 QoS 策略与防火墙规则
+- UAC 状态检测与提权
 """
 import os
 import sys
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QDoubleSpinBox, QCheckBox, QFrame, QMessageBox,
-    QStatusBar, QButtonGroup
+    QStatusBar, QButtonGroup, QApplication
 )
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QIcon
 
 from core.uac_manager import is_admin, restart_as_admin
-from core.limiter_engine import LimiterEngine
-from core.process_scanner import scan_processes, ProcessItem
-from ui.process_table import ProcessTableWidget
+from core.limiter_engine import LimiterEngine, LimitRequest
+from core.speed_monitor import SpeedMonitor
+from core.process_scanner import scan_and_group_processes, ProcessFamily
+from ui.process_tree import ProcessTreeWidget
 from ui.styles import DARK_THEME_QSS
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.engine = LimiterEngine()
+        self.speed_monitor = SpeedMonitor()
         self.current_filter_category = "ALL"
         self._init_window()
         self._init_ui()
         self.refresh_processes()
 
-        # 自动刷新定时器 (默认 4 秒刷新一次)
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self._on_auto_refresh)
+        # 实时网速定时采样更新定时器 (每 1.5 秒采样更新一次实时网速)
+        self.speed_timer = QTimer(self)
+        self.speed_timer.timeout.connect(self._on_speed_tick)
+        self.speed_timer.start(1500)
+
+        # 自动重扫进程定时器 (默认 5 秒重扫一次进程树)
+        self.scan_timer = QTimer(self)
+        self.scan_timer.timeout.connect(self._on_auto_refresh)
         if self.auto_refresh_cb.isChecked():
-            self.timer.start(4000)
+            self.scan_timer.start(5000)
 
     def _init_window(self):
         self.setWindowTitle("进程网络限速助手 (ProcessNetLimiter) - 专业版")
-        self.resize(1100, 720)
-        self.setMinimumSize(850, 580)
+        self.resize(1120, 740)
+        self.setMinimumSize(880, 600)
         self.setStyleSheet(DARK_THEME_QSS)
 
     def _init_ui(self):
@@ -54,7 +59,7 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(16, 16, 16, 16)
         main_layout.setSpacing(12)
 
-        # 1. 顶部栏 (标题、管理员权限徽章、搜索与刷新)
+        # 1. 顶部栏 (标题、管理员状态、搜索与刷新)
         header_card = QFrame()
         header_card.setObjectName("HeaderCard")
         header_layout = QHBoxLayout(header_card)
@@ -69,12 +74,10 @@ class MainWindow(QMainWindow):
         self.admin_btn = QPushButton()
         if is_admin():
             self.admin_btn.setObjectName("AdminBadgeOk")
-            self.admin_btn.setText("🛡️ 已获得管理员权限 (全功能就绪)")
-            # 已移除悬浮提示框
+            self.admin_btn.setText("🛡️ 已获得管理员权限")
         else:
             self.admin_btn.setObjectName("AdminBadgeWarn")
-            self.admin_btn.setText("⚠️ 未获取管理员权限 (点击以管理员身份重启)")
-            # 已移除悬浮提示框
+            self.admin_btn.setText("⚠️ 未获取管理员权限 (点击提权)")
             self.admin_btn.clicked.connect(self._on_request_admin)
         header_layout.addWidget(self.admin_btn)
 
@@ -82,13 +85,13 @@ class MainWindow(QMainWindow):
 
         # 搜索输入框
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍 搜索进程名、PID 或路径...")
-        self.search_input.setFixedWidth(240)
+        self.search_input.setPlaceholderText("🔍 搜索家族、进程名、PID 或路径...")
+        self.search_input.setFixedWidth(260)
         self.search_input.textChanged.connect(self._on_search_changed)
         header_layout.addWidget(self.search_input)
 
         # 自动刷新复选框
-        self.auto_refresh_cb = QCheckBox("自动刷新")
+        self.auto_refresh_cb = QCheckBox("自动刷新列表")
         self.auto_refresh_cb.setChecked(False)
         self.auto_refresh_cb.stateChanged.connect(self._on_auto_refresh_toggle)
         header_layout.addWidget(self.auto_refresh_cb)
@@ -129,23 +132,23 @@ class MainWindow(QMainWindow):
 
         # 快捷选择按钮
         self.select_all_btn = QPushButton("全选")
-        self.select_all_btn.clicked.connect(lambda: self.table.select_all(True))
+        self.select_all_btn.clicked.connect(lambda: self.tree.select_all(True))
         filter_bar.addWidget(self.select_all_btn)
 
         self.invert_btn = QPushButton("反选")
-        self.invert_btn.clicked.connect(lambda: self.table.invert_selection())
+        self.invert_btn.clicked.connect(lambda: self.tree.invert_selection())
         filter_bar.addWidget(self.invert_btn)
 
         self.clear_sel_btn = QPushButton("全不选")
-        self.clear_sel_btn.clicked.connect(lambda: self.table.select_all(False))
+        self.clear_sel_btn.clicked.connect(lambda: self.tree.select_all(False))
         filter_bar.addWidget(self.clear_sel_btn)
 
         main_layout.addLayout(filter_bar)
 
-        # 3. 进程数据表格
-        self.table = ProcessTableWidget()
-        self.table.selectionChangedCustom.connect(self._on_selection_changed)
-        main_layout.addWidget(self.table, 1)
+        # 3. 任务管理器风格的进程家族树状视图
+        self.tree = ProcessTreeWidget()
+        self.tree.selectionChangedCustom.connect(self._on_selection_changed)
+        main_layout.addWidget(self.tree, 1)
 
         # 4. 底部限速操作控制面板
         control_card = QFrame()
@@ -156,13 +159,13 @@ class MainWindow(QMainWindow):
 
         # 控制栏上部：已选择摘要与分离设置开关
         top_ctrl_row = QHBoxLayout()
-        self.selected_summary_label = QLabel("已选择 0 个程序")
+        self.selected_summary_label = QLabel("已选择 0 个程序/家族")
         self.selected_summary_label.setObjectName("SectionTitle")
         top_ctrl_row.addWidget(self.selected_summary_label)
 
         top_ctrl_row.addSpacing(20)
 
-        self.separate_cb = QCheckBox("⚙️ 分别设置上传和下载速度 (支持独立配置)")
+        self.separate_cb = QCheckBox("⚙️ 分别设置上传和下载速度 (独立配置)")
         self.separate_cb.setChecked(False)
         self.separate_cb.stateChanged.connect(self._on_separate_toggle)
         top_ctrl_row.addWidget(self.separate_cb)
@@ -268,38 +271,49 @@ class MainWindow(QMainWindow):
         # 5. 底部状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪。提示：勾选进程后即可配置限速或断网。")
+        self.status_bar.showMessage("就绪。提示：支持直接勾选进程家族批量限速，或展开家族仅限制某一特定进程。")
 
     def refresh_processes(self):
-        """重新扫描进程与活动策略"""
+        """重新扫描进程家族与活动策略"""
         policies = self.engine.get_active_policies()
-        items = scan_processes(policies)
-        self.table.update_data(items)
-        
-        limited_count = sum(1 for it in items if it.is_limited)
-        active_conn_count = sum(1 for it in items if it.connections_count > 0)
-        self.status_bar.showMessage(f"已刷新 | 总进程: {len(items)} | 活跃联网进程: {active_conn_count} | 当前已限制: {limited_count}")
+        speeds = self.speed_monitor.update_and_get_speeds()
+        families = scan_and_group_processes(policies, speeds)
+        self.tree.update_data(families)
+
+        total_procs = sum(len(f.children) for f in families)
+        limited_count = sum(1 for f in families if f.is_limited)
+        active_conn_count = sum(1 for f in families if f.total_connections > 0)
+        self.status_bar.showMessage(
+            f"已刷新 | 进程家族: {len(families)} | 总进程数: {total_procs} | 联网家族: {active_conn_count} | 已限制: {limited_count}"
+        )
+
+    def _on_speed_tick(self):
+        """定期采样实时网速并静默刷新树状视图"""
+        speeds = self.speed_monitor.update_and_get_speeds()
+        policies = self.engine.get_active_policies()
+        families = scan_and_group_processes(policies, speeds)
+        self.tree.update_data(families)
 
     def _on_auto_refresh(self):
         self.refresh_processes()
 
     def _on_auto_refresh_toggle(self, state):
         if state == Qt.Checked:
-            self.timer.start(4000)
-            self.status_bar.showMessage("已开启自动刷新 (每 4 秒)")
+            self.scan_timer.start(5000)
+            self.status_bar.showMessage("已开启自动刷新 (每 5 秒)")
         else:
-            self.timer.stop()
+            self.scan_timer.stop()
             self.status_bar.showMessage("已关闭自动刷新")
 
     def _on_search_changed(self, text):
-        self.table.apply_filter(text, self.current_filter_category)
+        self.tree.apply_filter(text, self.current_filter_category)
 
     def _on_filter_chip_clicked(self, category_tag):
         self.current_filter_category = category_tag
-        self.table.apply_filter(self.search_input.text(), self.current_filter_category)
+        self.tree.apply_filter(self.search_input.text(), self.current_filter_category)
 
     def _on_selection_changed(self, count):
-        self.selected_summary_label.setText(f"已选择 {count} 个程序")
+        self.selected_summary_label.setText(f"已选择 {count} 个程序/家族")
 
     def _on_separate_toggle(self, state):
         is_separate = (state == Qt.Checked)
@@ -310,17 +324,16 @@ class MainWindow(QMainWindow):
             self.up_title.setText("速度限制 (上传与下载联动):")
 
     def _on_up_combo_changed(self, index):
-        is_custom = (index == 4)  # 自定义速度限制
+        is_custom = (index == 4)
         self.up_spin.setVisible(is_custom)
         self.up_unit.setVisible(is_custom)
 
     def _on_dl_combo_changed(self, index):
-        is_custom = (index == 4)  # 自定义速度限制
+        is_custom = (index == 4)
         self.dl_spin.setVisible(is_custom)
         self.dl_unit.setVisible(is_custom)
 
     def _on_request_admin(self):
-        """以管理员身份重新启动"""
         if restart_as_admin():
             sys.exit(0)
         else:
@@ -339,9 +352,9 @@ class MainWindow(QMainWindow):
 
     def _on_apply_limits(self):
         """批量合并应用速度限制或断开连接 (无感极速下发)"""
-        selected = self.table.get_selected_items()
-        if not selected:
-            QMessageBox.information(self, "提示", "请先在上方列表中勾选需要限制网络的一个或多个程序！")
+        targets = self.tree.get_selected_targets()
+        if not targets:
+            QMessageBox.information(self, "提示", "请先在列表中勾选需要限制网络的一个或多个程序或家族！")
             return
 
         is_separate = self.separate_cb.isChecked()
@@ -353,11 +366,10 @@ class MainWindow(QMainWindow):
         dl_val = self.dl_spin.value() if is_separate else up_val
         dl_unit = self.dl_unit.currentText() if is_separate else up_unit
 
-        from core.limiter_engine import LimitRequest
         requests = [
             LimitRequest(
-                app_name=item.name,
-                app_path=item.exe_path,
+                app_name=app_name,
+                app_path=exe_path,
                 upload_speed_type=up_choice,
                 download_speed_type=dl_choice,
                 custom_upload_val=up_val,
@@ -365,11 +377,9 @@ class MainWindow(QMainWindow):
                 custom_download_val=dl_val,
                 custom_download_unit=dl_unit
             )
-            for item in selected
+            for app_name, exe_path in targets
         ]
 
-        from PyQt5.QtWidgets import QApplication
-        from PyQt5.QtCore import Qt
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             ok, msg = self.engine.apply_limits_batch(requests)
@@ -378,21 +388,19 @@ class MainWindow(QMainWindow):
 
         self.refresh_processes()
         if ok:
-            self.status_bar.showMessage(f"已成功为 {len(requests)} 个程序下发并生效网络限制策略！")
+            self.status_bar.showMessage(f"已成功为 {len(requests)} 个目标下发并生效限制策略！")
         else:
             QMessageBox.warning(self, "策略应用失败", msg)
 
     def _on_remove_selected(self):
         """批量取消选中程序的限制 (极速执行)"""
-        selected = self.table.get_selected_items()
-        if not selected:
-            QMessageBox.information(self, "提示", "请先在列表中勾选要解除限制的程序！")
+        targets = self.tree.get_selected_targets()
+        if not targets:
+            QMessageBox.information(self, "提示", "请先在列表中勾选要解除限制的程序或家族！")
             return
 
-        app_names = [item.name for item in selected]
-        
-        from PyQt5.QtWidgets import QApplication
-        from PyQt5.QtCore import Qt
+        app_names = [name for name, _ in targets]
+
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             ok, msg, count = self.engine.remove_limits_batch(app_names)
@@ -412,8 +420,6 @@ class MainWindow(QMainWindow):
             QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            from PyQt5.QtWidgets import QApplication
-            from PyQt5.QtCore import Qt
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 ok, msg, count = self.engine.remove_all_limits()
