@@ -70,11 +70,11 @@ class MainWindow(QMainWindow):
         if is_admin():
             self.admin_btn.setObjectName("AdminBadgeOk")
             self.admin_btn.setText("🛡️ 已获得管理员权限 (全功能就绪)")
-            self.admin_btn.setToolTip("当前处于管理员权限下，可顺畅下发 QoS 限速与阻断策略")
+            # 已移除悬浮提示框
         else:
             self.admin_btn.setObjectName("AdminBadgeWarn")
             self.admin_btn.setText("⚠️ 未获取管理员权限 (点击以管理员身份重启)")
-            self.admin_btn.setToolTip("Windows QoS 限速属于系统核心网络策略，需要管理员权限。点击此处提权重启。")
+            # 已移除悬浮提示框
             self.admin_btn.clicked.connect(self._on_request_admin)
         header_layout.addWidget(self.admin_btn)
 
@@ -109,10 +109,10 @@ class MainWindow(QMainWindow):
 
         chips = [
             ("全部程序", "ALL"),
-            ("⚡ 下载器优先", "DOWNLOADER"),
-            ("☁️ 网盘优先", "CLOUD_DRIVE"),
-            ("🎮 游戏优先", "GAME"),
-            ("⛔ 已限制/断网", "LIMITED"),
+            ("⚡ 筛选下载器", "DOWNLOADER"),
+            ("☁️ 筛选网盘", "CLOUD_DRIVE"),
+            ("🎮 筛选游戏", "GAME"),
+            ("⛔ 筛选已限制", "LIMITED"),
         ]
 
         for i, (label, tag) in enumerate(chips):

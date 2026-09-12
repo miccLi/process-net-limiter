@@ -4,6 +4,16 @@
 """
 
 DARK_THEME_QSS = """
+/* 浮动提示框 ToolTip 样式优化 (深色背景，清晰文字) */
+QToolTip {
+    background-color: #1e242d;
+    color: #f8fafc;
+    border: 1px solid #475569;
+    border-radius: 4px;
+    padding: 5px 9px;
+    font-size: 12px;
+}
+
 /* 全局基础设置 */
 * {
     font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
