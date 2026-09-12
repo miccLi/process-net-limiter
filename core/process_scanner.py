@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 进程扫描与智能归类引擎
-- 枚举系统中当前运行的所有进程
-- 统计活跃网络连接数 (TCP/UDP)
+- 扫描系统当前运行进程
 - 识别常见 游戏、网盘、下载器、浏览器
-- 智能排序：已限速 > 下载器 > 网盘 > 游戏 > 活跃网络进程 > 普通后台进程
+- 排序规则：被限速/断网的程序排在最前；其次是下载器、网盘、游戏；再次为活跃联网程序
+- 彻底修复 NoneType 比较导致进程异常消失的问题
 """
 import os
 import psutil
@@ -13,7 +13,6 @@ from enum import Enum
 from core.limiter_engine import PolicyStatus
 
 class ProcessCategory(Enum):
-    LIMITED = ("已限速", "⛔", "#ef4444", 0)
     DOWNLOADER = ("下载器", "⚡", "#8b5cf6", 1)
     CLOUD_DRIVE = ("网盘", "☁️", "#06b6d4", 2)
     GAME = ("游戏", "🎮", "#10b981", 3)
@@ -72,11 +71,8 @@ class ProcessItem:
     sort_priority: int
     selected: bool = False
 
-def classify_process(name: str, exe_path: str, is_limited: bool) -> ProcessCategory:
-    """对进程进行智能归类"""
-    if is_limited:
-        return ProcessCategory.LIMITED
-    
+def classify_process(name: str, exe_path: str) -> ProcessCategory:
+    """保留程序原本的自然分类"""
     name_lower = name.lower()
     path_lower = exe_path.lower() if exe_path else ""
 
@@ -96,9 +92,8 @@ def classify_process(name: str, exe_path: str, is_limited: bool) -> ProcessCateg
 
 def scan_processes(active_policies: dict[str, PolicyStatus]) -> list[ProcessItem]:
     """
-    扫描当前系统中所有运行的进程，结合网络连接数与已知限速策略进行归类和排序。
+    扫描系统中所有进程，与限速策略结合后进行归类和多级置顶排序。
     """
-    # 1. 统计各 PID 的网络连接数
     connections_by_pid: dict[int, int] = {}
     try:
         for c in psutil.net_connections(kind="inet"):
@@ -107,39 +102,45 @@ def scan_processes(active_policies: dict[str, PolicyStatus]) -> list[ProcessItem
     except Exception:
         pass
 
-    # 2. 遍历进程列表
     items: list[ProcessItem] = []
     seen_pids = set()
 
     for proc in psutil.process_iter(["pid", "name", "exe"]):
         try:
-            pid = proc.info["pid"]
-            if pid == 0 or pid in seen_pids:
+            pid = proc.info.get("pid")
+            if pid is None or pid == 0 or pid in seen_pids:
                 continue
             seen_pids.add(pid)
 
-            name = proc.info["name"] or f"Process_{pid}"
-            exe_path = proc.info["exe"] or ""
+            name = proc.info.get("name") or f"Process_{pid}"
+            exe_path = proc.info.get("exe") or ""
             conn_count = connections_by_pid.get(pid, 0)
 
-            # 检查是否有限速策略
+            # 严格类型安全检测限速策略，防 None 异常
             name_lower = name.lower()
             policy = active_policies.get(name_lower)
-            is_limited = bool(policy and (policy.is_blocked or policy.upload_bps > 0 or policy.download_bps > 0))
-            limit_summary = policy.summary if (policy and is_limited) else "正常"
+            is_limited = False
+            limit_summary = "正常"
 
-            category = classify_process(name, exe_path, is_limited)
+            if policy:
+                up_bps = int(policy.upload_bps or 0)
+                dl_bps = int(policy.download_bps or 0)
+                is_limited = bool(policy.is_blocked or up_bps > 0 or dl_bps > 0)
+                if is_limited:
+                    limit_summary = policy.summary or "已限速"
 
-            # 排序权重计算
-            # Priority 0: 已限速 (0)
-            # Priority 1: 下载器 (1)
-            # Priority 2: 网盘 (2)
-            # Priority 3: 游戏 (3)
-            # Priority 4: 浏览器/通讯 (4)
-            # Priority 5: 具有活跃网络连接的其他程序 (5)
-            # Priority 6: 无活跃网络连接的普通程序 (6)
+            category = classify_process(name, exe_path)
+
+            # 排序权重计算：
+            # Priority -1: 已限速程序 (始终置于最顶部，方便查看与取消)
+            # Priority 1: 下载器
+            # Priority 2: 网盘
+            # Priority 3: 游戏
+            # Priority 4: 浏览器/通讯
+            # Priority 5: 具有活跃网络连接的其他程序
+            # Priority 6: 无活跃网络连接的普通程序
             if is_limited:
-                sort_p = 0
+                sort_p = -1
             elif category == ProcessCategory.DOWNLOADER:
                 sort_p = 1
             elif category == ProcessCategory.CLOUD_DRIVE:
@@ -165,10 +166,10 @@ def scan_processes(active_policies: dict[str, PolicyStatus]) -> list[ProcessItem
             ))
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
-        except Exception:
+        except Exception as e:
+            print(f"扫描单进程跳过异常: {e}")
             continue
 
-    # 3. 智能多级排序：
-    # 规则：第一优先级 sort_priority 升序；第二优先级活跃网络连接数降序；第三优先级程序名升序
+    # 多级排序：第一优先级 sort_priority 升序；第二优先级活跃网络连接数降序；第三优先级程序名升序
     items.sort(key=lambda x: (x.sort_priority, -x.connections_count, x.name.lower()))
     return items

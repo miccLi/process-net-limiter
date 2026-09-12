@@ -17,6 +17,8 @@ class ProcessTableWidget(QTableWidget):
         super().__init__(parent)
         self.items_data: list[ProcessItem] = []
         self.displayed_items: list[ProcessItem] = []
+        self.current_search = ""
+        self.current_filter = "ALL"
         self._init_ui()
 
     def _init_ui(self):
@@ -49,22 +51,24 @@ class ProcessTableWidget(QTableWidget):
 
     def update_data(self, items: list[ProcessItem]):
         """更新表格数据"""
-        # 保留原有勾选状态
+        # 保留原有勾选状态 (按名称或 PID)
         checked_names = {item.name.lower() for item in self.items_data if item.selected}
         self.items_data = items
         for it in self.items_data:
             if it.name.lower() in checked_names:
                 it.selected = True
 
-        self.apply_filter("", "ALL")
+        self.apply_filter(self.current_search, self.current_filter)
 
     def apply_filter(self, search_text: str, category_filter: str):
         """根据搜索文本和类别过滤显示行"""
+        self.current_search = search_text
+        self.current_filter = category_filter
         search_lower = search_text.strip().lower()
         self.displayed_items = []
 
         for item in self.items_data:
-            # 类别过滤
+            # 类别过滤 (兼顾限速与分类)
             if category_filter == "DOWNLOADER" and item.category != ProcessCategory.DOWNLOADER:
                 continue
             elif category_filter == "CLOUD_DRIVE" and item.category != ProcessCategory.CLOUD_DRIVE:
@@ -74,7 +78,7 @@ class ProcessTableWidget(QTableWidget):
             elif category_filter == "LIMITED" and not item.is_limited:
                 continue
 
-            # 搜索文本过滤 (按进程名、PID 或路径)
+            # 搜索文本过滤
             if search_lower:
                 in_name = search_lower in item.name.lower()
                 in_pid = search_lower in str(item.pid)
@@ -109,10 +113,11 @@ class ProcessTableWidget(QTableWidget):
             self.setCellWidget(row, 0, cb_container)
 
             # Column 1: 程序名称
-            name_item = QTableWidgetItem(f"{item.category.icon} {item.name}")
+            name_text = f"{item.category.icon} {item.name}"
+            name_item = QTableWidgetItem(name_text)
             name_item.setFont(bold_font)
             if item.is_limited:
-                name_item.setForeground(QColor("#f87171"))  # 红色高亮
+                name_item.setForeground(QColor("#f87171"))  # 红色/橙色醒目高亮
             self.setItem(row, 1, name_item)
 
             # Column 2: PID
@@ -162,7 +167,6 @@ class ProcessTableWidget(QTableWidget):
         if 0 <= row < len(self.displayed_items):
             item = self.displayed_items[row]
             item.selected = not item.selected
-            # 更新复选框 UI
             cb_widget = self.cellWidget(row, 0)
             if cb_widget:
                 cb = cb_widget.findChild(QCheckBox)

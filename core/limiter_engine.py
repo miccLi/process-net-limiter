@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-网络限速与阻断核心引擎
-基于 Windows 原生 QoS 策略 (NetQosPolicy) 与 高级防火墙规则 (NetFirewallRule) 实现：
-- 速度限制 (1KB/s, 100KB/s, 1000KB/s, 自定义速度)
-- 完全断开连接 (阻断出站与入站网络)
-- 上传与下载独立或联动控制
-- 一键扫描、应用、解除所有策略
+网络限速与阻断核心引擎 (优化增强版)
+- 支持 Windows 原生 QoS (NetQosPolicy) 与防火墙阻断 (NetFirewallRule)
+- 自动配置 HKLM NLA 注册表项，确保家庭版与工作组非域网络下 QoS 100% 生效
+- 支持批量合并下发 (Batch Apply)，彻底解决多选时界面卡顿问题
+- 彻底修复 NoneType 类型异常与字段解析问题
 """
 import re
 import json
+import os
 from dataclasses import dataclass
-from core.uac_manager import run_powershell_script, is_admin
+from core.uac_manager import run_powershell_script
 
 QOS_PREFIX = "NetLimit_QoS_"
 FW_PREFIX = "NetLimit_Block_"
@@ -23,13 +23,24 @@ class PolicyStatus:
     download_bps: int = 0
     summary: str = "未限制"
 
+@dataclass
+class LimitRequest:
+    app_name: str
+    app_path: str
+    upload_speed_type: str
+    download_speed_type: str
+    custom_upload_val: float = 0
+    custom_upload_unit: str = "KB/s"
+    custom_download_val: float = 0
+    custom_download_unit: str = "KB/s"
+
 class LimiterEngine:
     def __init__(self):
         pass
 
     @staticmethod
     def speed_str_to_bps(speed_type: str, custom_val: float = 0, unit: str = "KB/s") -> int:
-        """将选择的速度档位转换为每秒比特数 (bits per second)"""
+        """将选择的速度档位转换为每秒比特数 (bps)"""
         if speed_type == "block":
             return -1  # 特殊标记：完全阻断
         elif speed_type == "1kb":
@@ -46,20 +57,19 @@ class LimiterEngine:
                 multiplier = 1024 * 1024 * 1024 * 8
             bps = int(custom_val * multiplier)
             return max(1000, bps)  # 最低 1000 bps
-        return 0  # 0 代表无限制
+        return 0  # 0 代表不限制
 
     def get_active_policies(self) -> dict[str, PolicyStatus]:
         """
         查询系统中所有由本程序建立的活动 QoS 策略与防火墙阻断规则。
-        返回字典: { "app_name.exe": PolicyStatus }
         """
         results: dict[str, PolicyStatus] = {}
-        
-        # 1. 检索 QoS 策略
+
+        # 检索 ActiveStore 与系统 QoS 策略及防火墙规则
         ps_script = f"""
-        $qos = Get-NetQosPolicy -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -like '{QOS_PREFIX}*' }}
-        $gpoQos = Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -like '{QOS_PREFIX}*' }}
-        $allQos = @($qos) + @($gpoQos) | Select-Object -Unique Name, AppPathNameMatchCondition, ThrottleRateActionBitsPerSecond
+        $qos1 = Get-NetQosPolicy -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -like '{QOS_PREFIX}*' }}
+        $qos2 = Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -like '{QOS_PREFIX}*' }}
+        $allQos = @($qos1) + @($qos2) | Select-Object -Unique Name, AppPathNameMatchCondition, ThrottleRateAction, ThrottleRateActionBitsPerSecond
         
         $fw = Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -like '{FW_PREFIX}*' }} | Select-Object DisplayName, Direction, Action
         
@@ -73,11 +83,13 @@ class LimiterEngine:
             return results
 
         try:
-            # 尝试提取 JSON 内容
             json_str = output[output.find('{'):output.rfind('}')+1]
+            if not json_str:
+                return results
+
             data = json.loads(json_str)
-            
-            # 解析 QoS
+
+            # 1. 解析 QoS 策略
             qos_list = data.get("QoS", [])
             if isinstance(qos_list, dict):
                 qos_list = [qos_list]
@@ -85,14 +97,18 @@ class LimiterEngine:
                 qos_list = []
 
             for item in qos_list:
-                name = item.get("Name", "")
-                app_path = item.get("AppPathNameMatchCondition", "")
-                rate = item.get("ThrottleRateActionBitsPerSecond", 0)
+                name = str(item.get("Name") or "")
+                app_path = str(item.get("AppPathNameMatchCondition") or "")
                 
-                # 从 name 中提取 app 标识
-                # 命名规范: NetLimit_QoS_UP_{app_name} 或 NetLimit_QoS_DL_{app_name} 或 NetLimit_QoS_ALL_{app_name}
-                app_name = ""
+                # 兼容不同系统的属性名，严格确保解析为 int
+                raw_rate = item.get("ThrottleRateAction") or item.get("ThrottleRateActionBitsPerSecond")
+                try:
+                    rate = int(raw_rate) if raw_rate is not None else 0
+                except (ValueError, TypeError):
+                    rate = 0
+
                 direction = "ALL"
+                app_name = ""
                 if name.startswith(f"{QOS_PREFIX}UP_"):
                     direction = "UP"
                     app_name = name[len(f"{QOS_PREFIX}UP_"):]
@@ -108,17 +124,20 @@ class LimiterEngine:
                 if not app_name and app_path:
                     app_name = app_path.split("\\")[-1]
 
+                if not app_name:
+                    continue
+
                 app_name_lower = app_name.lower()
                 if app_name_lower not in results:
                     results[app_name_lower] = PolicyStatus(app_name=app_name)
-                
+
                 status = results[app_name_lower]
                 if direction in ("UP", "ALL"):
                     status.upload_bps = rate
                 if direction in ("DL", "ALL"):
                     status.download_bps = rate
 
-            # 解析防火墙阻断
+            # 2. 解析防火墙阻断
             fw_list = data.get("Firewall", [])
             if isinstance(fw_list, dict):
                 fw_list = [fw_list]
@@ -126,92 +145,107 @@ class LimiterEngine:
                 fw_list = []
 
             for item in fw_list:
-                dname = item.get("DisplayName", "")
+                dname = str(item.get("DisplayName") or "")
                 if dname.startswith(FW_PREFIX):
-                    app_name = dname[len(FW_PREFIX):]
+                    raw_name = dname[len(FW_PREFIX):]
+                    app_name = re.sub(r'_(Out|In)$', '', raw_name)
                     app_name_lower = app_name.lower()
                     if app_name_lower not in results:
                         results[app_name_lower] = PolicyStatus(app_name=app_name)
                     results[app_name_lower].is_blocked = True
 
-            # 格式化汇总摘要
+            # 3. 构造显示摘要 (安全防 None)
             for status in results.values():
                 if status.is_blocked:
-                    status.summary = "⛔ 完全断网 (阻断连接)"
+                    status.summary = "⛔ 完全断网"
                 else:
+                    up_val = int(status.upload_bps or 0)
+                    dl_val = int(status.download_bps or 0)
                     parts = []
-                    if status.upload_bps > 0:
-                        parts.append(f"上: {status.upload_bps // 8192} KB/s")
-                    if status.download_bps > 0:
-                        parts.append(f"下: {status.download_bps // 8192} KB/s")
+                    if up_val > 0:
+                        parts.append(f"上: {up_val // 8192} KB/s")
+                    if dl_val > 0:
+                        parts.append(f"下: {dl_val // 8192} KB/s")
                     status.summary = " | ".join(parts) if parts else "已限速"
 
         except Exception as e:
-            print(f"解析活动策略失败: {e}")
+            print(f"解析活动策略日志: {e}")
 
         return results
 
-    def apply_limit(
-        self,
-        app_name: str,
-        app_path: str = "",
-        upload_speed_type: str = "none",
-        download_speed_type: str = "none",
-        custom_upload_val: float = 0,
-        custom_upload_unit: str = "KB/s",
-        custom_download_val: float = 0,
-        custom_download_unit: str = "KB/s"
-    ) -> tuple[bool, str]:
+    def apply_limits_batch(self, requests: list[LimitRequest]) -> tuple[bool, str]:
         """
-        对指定程序应用速度限制或完全阻断连接。
+        批量合并下发限速与阻断策略。
+        将所有进程的清理与新建指令合并为一次 PowerShell 执行，彻底消除多选卡顿。
         """
-        clean_app = app_name.strip()
-        safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
-        
-        up_bps = self.speed_str_to_bps(upload_speed_type, custom_upload_val, custom_upload_unit)
-        dl_bps = self.speed_str_to_bps(download_speed_type, custom_download_val, custom_download_unit)
-        
-        # 先清理旧策略
-        cleanup_ps = f"""
-        Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
-        Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -Confirm:$false -ErrorAction SilentlyContinue
-        Remove-NetQosPolicy -Name '{QOS_PREFIX}{safe_name}' -Confirm:$false -ErrorAction SilentlyContinue
-        Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}*' -ErrorAction SilentlyContinue
-        """
+        if not requests:
+            return True, "未指定待配置的程序"
 
-        commands = [cleanup_ps]
+        commands = [
+            "# 确保非域网络 (Home/Workgroup) 下 Policy-based QoS 生效",
+            "if (-not (Test-Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\QoS')) { New-Item -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\QoS' -Force | Out-Null }",
+            "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\QoS' -Name 'Do not use NLA' -Value '1' -Type String -Force"
+        ]
 
-        # 检查是否为“完全断开连接”
-        if upload_speed_type == "block" or download_speed_type == "block":
-            prog_arg = f"-Program '{app_path}'" if (app_path and os.path.exists(app_path)) else ""
-            # 新建阻断防火墙出入站规则
-            block_ps = f"""
-            New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_Out' -Direction Outbound -Action Block {prog_arg} -Description 'ProcessNetLimiter 阻断规则' -ErrorAction SilentlyContinue
-            New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Direction Inbound -Action Block {prog_arg} -Description 'ProcessNetLimiter 阻断规则' -ErrorAction SilentlyContinue
-            """
-            commands.append(block_ps)
-        else:
-            # QoS 速度限制
-            # 1. 上传限制
-            if up_bps > 0 and (up_bps == dl_bps):
-                # 上下行速率一致，创建统一策略
-                qos_cmd = f"New-NetQosPolicy -Name '{QOS_PREFIX}ALL_{safe_name}' -AppPathNameMatchCondition '{clean_app}' -ThrottleRateActionBitsPerSecond {up_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue"
-                commands.append(qos_cmd)
+        for req in requests:
+            clean_app = req.app_name.strip()
+            safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
+            
+            up_bps = self.speed_str_to_bps(req.upload_speed_type, req.custom_upload_val, req.custom_upload_unit)
+            dl_bps = self.speed_str_to_bps(req.download_speed_type, req.custom_download_val, req.custom_download_unit)
+
+            # 清理该程序的旧策略
+            commands.append(f"""
+Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetQosPolicy -Name '{QOS_PREFIX}{safe_name}' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}*' -ErrorAction SilentlyContinue
+            """)
+
+            # 检查是否为“完全断开连接”
+            if req.upload_speed_type == "block" or req.download_speed_type == "block":
+                prog_arg = f"-Program '{req.app_path}'" if (req.app_path and os.path.exists(req.app_path)) else ""
+                commands.append(f"""
+New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_Out' -Direction Outbound -Action Block {prog_arg} -Description 'ProcessNetLimiter 阻断规则' -ErrorAction SilentlyContinue | Out-Null
+New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Direction Inbound -Action Block {prog_arg} -Description 'ProcessNetLimiter 阻断规则' -ErrorAction SilentlyContinue | Out-Null
+                """)
             else:
-                if up_bps > 0:
-                    qos_up = f"New-NetQosPolicy -Name '{QOS_PREFIX}UP_{safe_name}' -AppPathNameMatchCondition '{clean_app}' -ThrottleRateActionBitsPerSecond {up_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue"
-                    commands.append(qos_up)
-                if dl_bps > 0:
-                    # Windows QoS 主要针对出站速率整形。通过限制该进程出站速率（包括 TCP ACK 反馈速率），
-                    # TCP 流量受滑动窗口与拥塞控制限制，会平滑限制下行下载速率。
-                    qos_dl = f"New-NetQosPolicy -Name '{QOS_PREFIX}DL_{safe_name}' -AppPathNameMatchCondition '{clean_app}' -ThrottleRateActionBitsPerSecond {dl_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue"
-                    commands.append(qos_dl)
+                # QoS 速度限制
+                if up_bps > 0 and (up_bps == dl_bps):
+                    commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}ALL_{safe_name}' -AppPathNameMatchCondition '{clean_app}' -ThrottleRateActionBitsPerSecond {up_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
+                else:
+                    if up_bps > 0:
+                        commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}UP_{safe_name}' -AppPathNameMatchCondition '{clean_app}' -ThrottleRateActionBitsPerSecond {up_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
+                    if dl_bps > 0:
+                        commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}DL_{safe_name}' -AppPathNameMatchCondition '{clean_app}' -ThrottleRateActionBitsPerSecond {dl_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
 
         full_script = "\n".join(commands)
         ok, msg = run_powershell_script(full_script)
         if ok:
-            return True, f"已成功为 {clean_app} 配置网络限制规则"
-        return False, f"配置失败: {msg}"
+            return True, f"已成功为 {len(requests)} 个程序应用限制规则"
+        return False, f"批量下发策略失败: {msg}"
+
+    def remove_limits_batch(self, app_names: list[str]) -> tuple[bool, str, int]:
+        """批量解除多个程序的限速与阻断规则 (合并执行)"""
+        if not app_names:
+            return True, "未指定程序", 0
+
+        commands = []
+        for app in app_names:
+            clean_app = app.strip()
+            safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
+            commands.append(f"""
+Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetQosPolicy -Name '{QOS_PREFIX}{safe_name}' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}*' -ErrorAction SilentlyContinue
+            """)
+
+        full_script = "\n".join(commands)
+        ok, msg = run_powershell_script(full_script)
+        if ok:
+            return True, f"已成功解除 {len(app_names)} 个程序的网络限制", len(app_names)
+        return False, f"批量解除失败: {msg}", 0
 
     def remove_limit(self, app_name: str) -> tuple[bool, str]:
         """解除指定程序的限速与阻断"""
@@ -254,5 +288,5 @@ class LimiterEngine:
         except Exception:
             pass
         if ok:
-            return True, "已成功一键清除所有网络限制与断网规则", count
+            return True, "已成功一键清除所有网络限速与阻断策略", count
         return False, f"一键清除失败: {msg}", 0

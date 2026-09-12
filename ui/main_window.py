@@ -338,7 +338,7 @@ class MainWindow(QMainWindow):
         return mapping.get(combo_idx, "none")
 
     def _on_apply_limits(self):
-        """应用速度限制或断开连接"""
+        """批量合并应用速度限制或断开连接 (无感极速下发)"""
         selected = self.table.get_selected_items()
         if not selected:
             QMessageBox.information(self, "提示", "请先在上方列表中勾选需要限制网络的一个或多个程序！")
@@ -346,22 +346,16 @@ class MainWindow(QMainWindow):
 
         is_separate = self.separate_cb.isChecked()
         up_choice = self._parse_speed_choice(self.up_combo.currentIndex())
-        
-        if is_separate:
-            dl_choice = self._parse_speed_choice(self.dl_combo.currentIndex())
-        else:
-            dl_choice = up_choice
+        dl_choice = self._parse_speed_choice(self.dl_combo.currentIndex()) if is_separate else up_choice
 
         up_val = self.up_spin.value()
         up_unit = self.up_unit.currentText()
         dl_val = self.dl_spin.value() if is_separate else up_val
         dl_unit = self.dl_unit.currentText() if is_separate else up_unit
 
-        success_count = 0
-        fail_msgs = []
-
-        for item in selected:
-            ok, msg = self.engine.apply_limit(
+        from core.limiter_engine import LimitRequest
+        requests = [
+            LimitRequest(
                 app_name=item.name,
                 app_path=item.exe_path,
                 upload_speed_type=up_choice,
@@ -371,46 +365,68 @@ class MainWindow(QMainWindow):
                 custom_download_val=dl_val,
                 custom_download_unit=dl_unit
             )
-            if ok:
-                success_count += 1
-            else:
-                fail_msgs.append(f"{item.name}: {msg}")
+            for item in selected
+        ]
+
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import Qt
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok, msg = self.engine.apply_limits_batch(requests)
+        finally:
+            QApplication.restoreOverrideCursor()
 
         self.refresh_processes()
-        if fail_msgs:
-            QMessageBox.warning(self, "部分策略应用失败", f"成功: {success_count} 个，失败: {len(fail_msgs)} 个\n" + "\n".join(fail_msgs[:3]))
+        if ok:
+            self.status_bar.showMessage(f"已成功为 {len(requests)} 个程序下发并生效网络限制策略！")
         else:
-            self.status_bar.showMessage(f"成功为 {success_count} 个程序应用限制规则！")
+            QMessageBox.warning(self, "策略应用失败", msg)
 
     def _on_remove_selected(self):
-        """取消选中程序的限制"""
+        """批量取消选中程序的限制 (极速执行)"""
         selected = self.table.get_selected_items()
         if not selected:
             QMessageBox.information(self, "提示", "请先在列表中勾选要解除限制的程序！")
             return
 
-        count = 0
-        for item in selected:
-            ok, _ = self.engine.remove_limit(item.name)
-            if ok:
-                count += 1
+        app_names = [item.name for item in selected]
+        
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import Qt
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok, msg, count = self.engine.remove_limits_batch(app_names)
+        finally:
+            QApplication.restoreOverrideCursor()
 
         self.refresh_processes()
-        self.status_bar.showMessage(f"已为 {count} 个程序解除网络限制规则。")
+        self.status_bar.showMessage(f"已成功为 {count} 个程序解除限制，网络恢复正常！")
 
     def _on_reset_all(self):
-        """一键解除全部限制"""
+        """一键解除全部限制 (带安全检查与即时反馈)"""
         reply = QMessageBox.question(
             self,
             "确认解除所有限制",
-            "确定要一键清空系统中所有由本工具设置的 QoS 速度限制与网络阻断规则吗？",
+            "确定要一键清空系统中所有由本工具设置的 QoS 速度限制与网络阻断规则吗？\n此操作将确保所有程序的网络恢复初始无限制状态。",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            ok, msg, count = self.engine.remove_all_limits()
+            from PyQt5.QtWidgets import QApplication
+            from PyQt5.QtCore import Qt
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                ok, msg, count = self.engine.remove_all_limits()
+            finally:
+                QApplication.restoreOverrideCursor()
+
             self.refresh_processes()
             if ok:
-                QMessageBox.information(self, "操作成功", f"已成功一键解除所有网络限速与阻断策略 (清理了 {count} 项规则)！")
+                QMessageBox.information(
+                    self,
+                    "操作成功",
+                    f"已成功一键解除系统中所有限速与阻断策略 (清理了 {count} 项规则)！\n当前系统中已无任何残留限制，所有程序网络均处于正常无限制状态。"
+                )
+                self.status_bar.showMessage("已成功解除全部限制，所有程序网络恢复正常。")
             else:
                 QMessageBox.warning(self, "操作失败", msg)
