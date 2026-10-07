@@ -18,7 +18,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 from core.uac_manager import is_admin, restart_as_admin
-from core.limiter_engine import LimiterEngine, LimitRequest
+from core.engine_manager import EngineManager
+from core.limiter_engine import LimitRequest
 from core.process_scanner import scan_and_group_processes, ProcessFamily
 from ui.process_tree import ProcessTreeWidget
 from ui.styles import DARK_THEME_QSS
@@ -59,7 +60,7 @@ class AsyncWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.engine = LimiterEngine()
+        self.engine = EngineManager()
         self.current_filter_category = "ALL"
         self._active_worker = None
         self._init_window()
@@ -96,6 +97,15 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(sub_title)
 
         top_bar.addStretch()
+
+        # 引擎架构状态指示
+        self.engine_badge = QLabel(self.engine.active_engine_display)
+        self.engine_badge.setObjectName("EngineBadge")
+        self.engine_badge.setStyleSheet(
+            "background-color: #1a252f; color: #3498db; border: 1px solid #2980b9; "
+            "padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 11px;"
+        )
+        top_bar.addWidget(self.engine_badge)
 
         # 管理员权限指示
         self.admin_btn = QPushButton()
@@ -292,7 +302,7 @@ class MainWindow(QMainWindow):
         ctrl_layout.addLayout(settings_row)
 
         # 原理与机制温馨提示
-        tip_label = QLabel("💡 提示：'完全断开连接'通过防火墙彻底阻断网络(100%生效)；下载限速基于系统QoS出站ACK调控，若Steam/百度网盘等多线程下载器并发流极多或开启了加速器/TUN，建议优先使用其内置下载限速。")
+        tip_label = QLabel("💡 提示：当前已启用 WinDivert 内核级流量整形引擎 (NetLimiter 同级技术，秒级生效且支持游戏 UDP/TCP 严格卡死 1KB/s)。'完全断开连接'同时执行内核与防火墙双重物理阻断。")
         tip_label.setStyleSheet("color: #718096; font-size: 11px; padding-top: 2px;")
         tip_label.setWordWrap(True)
         ctrl_layout.addWidget(tip_label)
