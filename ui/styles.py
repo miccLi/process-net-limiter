@@ -152,6 +152,10 @@ QCheckBox::indicator:checked {
     background-color: #2563eb;
     border-color: #3b82f6;
 }
+QCheckBox::indicator:indeterminate {
+    background-color: #0284c7;
+    border-color: #38bdf8;
+}
 
 /* 按钮通用设计 */
 QPushButton {

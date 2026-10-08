@@ -23,6 +23,21 @@ COL_CATEGORY = 4    # 类别徽章
 COL_CONNS = 5       # 网络连接
 COL_PATH = 6        # 执行文件路径 (排在最后)
 
+
+class TristateHeaderCheckBox(QCheckBox):
+    """
+    专为多子项家族节点设计的防误触三态复选框。
+    Qt 默认 tristate 复选框在点击时会按 Unchecked -> PartiallyChecked -> Checked 循环；
+    重写 nextCheckState，保证用户手动点击时只在 Unchecked 与 Checked 之间切换，
+    PartiallyChecked 状态仅由子进程实际勾选状态程序化联动驱动。
+    """
+    def nextCheckState(self):
+        if self.checkState() == Qt.Checked:
+            self.setCheckState(Qt.Unchecked)
+        else:
+            self.setCheckState(Qt.Checked)
+
+
 class ProcessTreeWidget(QTreeWidget):
     selectionChangedCustom = pyqtSignal(int)
 
@@ -77,10 +92,11 @@ class ProcessTreeWidget(QTreeWidget):
         expanded_fams = set()
 
         for fam in self.families_data:
-            if fam.selected:
+            non_prot = [c for c in fam.children if not c.is_protected]
+            if non_prot and all(c.selected for c in non_prot):
                 checked_fams.add(fam.family_id)
             for child in fam.children:
-                if child.selected:
+                if child.selected and not child.is_protected:
                     checked_pids.add(child.pid)
 
         for i in range(self.topLevelItemCount()):
@@ -92,10 +108,17 @@ class ProcessTreeWidget(QTreeWidget):
         self.families_data = families
 
         for fam in self.families_data:
-            fam.selected = (fam.family_id in checked_fams)
+            is_entire_fam_checked = (fam.family_id in checked_fams)
             for child in fam.children:
-                if child.pid in checked_pids or fam.selected:
+                if child.is_protected:
+                    child.selected = False
+                elif is_entire_fam_checked or (child.pid in checked_pids):
                     child.selected = True
+                else:
+                    child.selected = False
+
+            non_prot = [c for c in fam.children if not c.is_protected]
+            fam.selected = bool(non_prot and all(c.selected for c in non_prot))
 
         self.apply_filter(self.current_search, self.current_filter, expanded_fams)
 
@@ -114,7 +137,9 @@ class ProcessTreeWidget(QTreeWidget):
                 continue
             elif category_filter == "GAME" and fam.category != ProcessCategory.GAME:
                 continue
-            elif category_filter == "LIMITED" and not fam.is_limited:
+            elif category_filter == "BROWSER_SOCIAL" and fam.category != ProcessCategory.BROWSER_SOCIAL:
+                continue
+            elif category_filter == "LIMITED" and not (fam.is_limited or any(c.is_limited for c in fam.children)):
                 continue
 
             # 搜索文本过滤
@@ -140,9 +165,30 @@ class ProcessTreeWidget(QTreeWidget):
             fam_item = QTreeWidgetItem(self)
             fam_item.setData(0, Qt.UserRole, fam.family_id)
 
+            # 计算家族初始勾选状态 (三态联动)
+            non_prot = [c for c in fam.children if not c.is_protected]
+            if not non_prot:
+                fam_state = Qt.Unchecked
+                fam.selected = False
+            elif all(c.selected for c in non_prot):
+                fam_state = Qt.Checked
+                fam.selected = True
+            elif any(c.selected for c in non_prot):
+                fam_state = Qt.PartiallyChecked
+                fam.selected = False
+            else:
+                fam_state = Qt.Unchecked
+                fam.selected = False
+
             # 复选框 (Column 0)
-            cb = QCheckBox()
-            cb.setChecked(fam.selected)
+            if len(fam.children) > 1:
+                cb = TristateHeaderCheckBox()
+                cb.setTristate(True)
+                cb.setCheckState(fam_state)
+            else:
+                cb = QCheckBox()
+                cb.setChecked(fam_state == Qt.Checked)
+
             if fam.is_protected:
                 cb.setEnabled(False)
                 cb.setToolTip("系统核心保护进程，已锁定禁止限制网络")
@@ -250,13 +296,14 @@ class ProcessTreeWidget(QTreeWidget):
         is_checked = (state == Qt.Checked)
         fam.selected = is_checked
         for child in fam.children:
-            child.selected = is_checked
+            if not child.is_protected:
+                child.selected = is_checked
         for i in range(fam_item.childCount()):
             child_item = fam_item.child(i)
             widget = self.itemWidget(child_item, COL_CHECK)
             if widget:
                 cb = widget.findChild(QCheckBox)
-                if cb:
+                if cb and cb.isEnabled():
                     cb.blockSignals(True)
                     cb.setChecked(is_checked)
                     cb.blockSignals(False)
@@ -264,14 +311,27 @@ class ProcessTreeWidget(QTreeWidget):
 
     def _on_child_checkbox_changed(self, child: ProcessItem, fam: ProcessFamily, fam_item: QTreeWidgetItem, state: int):
         child.selected = (state == Qt.Checked)
-        fam.selected = any(c.selected for c in fam.children)
+
+        non_prot = [c for c in fam.children if not c.is_protected]
+        if not non_prot:
+            fam.selected = False
+            target_state = Qt.Unchecked
+        elif all(c.selected for c in non_prot):
+            fam.selected = True
+            target_state = Qt.Checked
+        elif any(c.selected for c in non_prot):
+            fam.selected = False
+            target_state = Qt.PartiallyChecked
+        else:
+            fam.selected = False
+            target_state = Qt.Unchecked
 
         fam_widget = self.itemWidget(fam_item, COL_CHECK)
         if fam_widget:
             fam_cb = fam_widget.findChild(QCheckBox)
             if fam_cb:
                 fam_cb.blockSignals(True)
-                fam_cb.setChecked(fam.selected)
+                fam_cb.setCheckState(target_state)
                 fam_cb.blockSignals(False)
         self._emit_selected_count()
 
@@ -280,18 +340,19 @@ class ProcessTreeWidget(QTreeWidget):
         if widget:
             cb = widget.findChild(QCheckBox)
             if cb and cb.isEnabled():
-                cb.setChecked(not cb.isChecked())
+                cb.nextCheckState()
 
     def select_all(self, selected: bool):
         # 仅对当前筛选展示的项生效，且自动跳过系统保护进程
         for fam in self.displayed_families:
             if selected and fam.is_protected:
                 continue
-            fam.selected = selected
             for c in fam.children:
                 if selected and c.is_protected:
                     continue
                 c.selected = selected
+            non_prot = [c for c in fam.children if not c.is_protected]
+            fam.selected = bool(selected and non_prot and all(c.selected for c in non_prot))
         self._render_tree()
 
     def invert_selection(self):
@@ -299,11 +360,12 @@ class ProcessTreeWidget(QTreeWidget):
         for fam in self.displayed_families:
             if fam.is_protected:
                 continue
-            fam.selected = not fam.selected
             for c in fam.children:
                 if c.is_protected:
                     continue
                 c.selected = not c.selected
+            non_prot = [c for c in fam.children if not c.is_protected]
+            fam.selected = bool(non_prot and all(c.selected for c in non_prot))
         self._render_tree()
 
     def get_selected_targets(self) -> list[tuple[str, str]]:
@@ -312,12 +374,12 @@ class ProcessTreeWidget(QTreeWidget):
             for child in fam.children:
                 if child.is_protected:
                     continue
-                if child.selected or fam.selected:
+                if child.selected:
                     name_key = child.name.lower()
                     if name_key not in targets:
                         targets[name_key] = (child.name, child.exe_path)
         return list(targets.values())
 
     def _emit_selected_count(self):
-        count = sum(1 for f in self.families_data if (f.selected and not f.is_protected) or any(c.selected and not c.is_protected for c in f.children))
-        self.selectionChangedCustom.emit(count)
+        targets = self.get_selected_targets()
+        self.selectionChangedCustom.emit(len(targets))

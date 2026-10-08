@@ -147,6 +147,7 @@ class MainWindow(QMainWindow):
 
         categories = [
             ("全部程序", "ALL"),
+            ("⛔ 仅看已限制", "LIMITED"),
             ("🚀 下载器优先", "DOWNLOADER"),
             ("☁️ 网盘优先", "CLOUD_DRIVE"),
             ("🎮 游戏优先", "GAME"),
@@ -301,11 +302,12 @@ class MainWindow(QMainWindow):
 
         ctrl_layout.addLayout(settings_row)
 
-        # 原理与机制温馨提示
-        tip_label = QLabel("💡 提示：当前已启用 WinDivert 内核级流量整形引擎 (NetLimiter 同级技术，秒级生效且支持游戏 UDP/TCP 严格卡死 1KB/s)。'完全断开连接'同时执行内核与防火墙双重物理阻断。")
-        tip_label.setStyleSheet("color: #718096; font-size: 11px; padding-top: 2px;")
-        tip_label.setWordWrap(True)
-        ctrl_layout.addWidget(tip_label)
+        # 原理与机制温馨提示 (动态跟随当前激活引擎展示)
+        self.tip_label = QLabel()
+        self.tip_label.setStyleSheet("color: #718096; font-size: 11px; padding-top: 2px;")
+        self.tip_label.setWordWrap(True)
+        self._update_engine_status_and_tip()
+        ctrl_layout.addWidget(self.tip_label)
 
         main_layout.addWidget(control_card)
 
@@ -327,8 +329,34 @@ class MainWindow(QMainWindow):
         else:
             self.apply_btn.setText("🚀 应用限速")
 
+    def _update_engine_status_and_tip(self):
+        """根据当前激活引擎动态更新顶部徽章与底部说明文案"""
+        if not hasattr(self, "engine_badge") or not hasattr(self, "tip_label"):
+            return
+        self.engine_badge.setText(self.engine.active_engine_display)
+        if self.engine.active_engine_name == "WINDIVERT":
+            self.engine_badge.setStyleSheet(
+                "background-color: #1a252f; color: #3498db; border: 1px solid #2980b9; "
+                "padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 11px;"
+            )
+            self.tip_label.setText(
+                "💡 提示：当前已启用 WinDivert 内核级流量整形引擎 (NetLimiter 同级技术，秒级生效且支持游戏 UDP/TCP 严格卡死 1KB/s)。"
+                "“完全断开连接”同时执行内核与防火墙双重物理阻断。"
+            )
+        else:
+            self.engine_badge.setStyleSheet(
+                "background-color: #142a1f; color: #2ecc71; border: 1px solid #27ae60; "
+                "padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 11px;"
+            )
+            self.tip_label.setText(
+                "💡 提示：当前处于 Windows 原生系统策略引擎模式 (基于系统组策略 QoS 出站整形与高级安全防火墙)。"
+                "出站限速内核级平稳生效，入站限速由 TCP 窗口协商节流，“完全断开连接”通过防火墙双向毫秒级物理阻断。"
+            )
+
     def refresh_processes(self):
-        """重新扫描进程家族与活动策略 (异步执行，彻底避免窗体假死)"""
+        """重新扫描进程家族与活动策略 (异步执行，彻底避免窗体假死与重入)"""
+        if hasattr(self, "_scan_worker") and self._scan_worker and self._scan_worker.isRunning():
+            return
         self.refresh_btn.setEnabled(False)
         self.status_bar.showMessage("正在获取活动策略并扫描进程家族...")
 
@@ -343,6 +371,7 @@ class MainWindow(QMainWindow):
 
     def _on_refresh_completed(self, ok: bool, msg: str, families: list):
         self.refresh_btn.setEnabled(True)
+        self._update_engine_status_and_tip()
         if ok and families is not None:
             self.tree.update_data(families)
             total_procs = sum(len(f.children) for f in families)
@@ -357,6 +386,7 @@ class MainWindow(QMainWindow):
     def _on_async_policy_op_finished(self, ok: bool, msg: str, policies: dict):
         """策略操作异步完成回调：直接利用回读的 policies 刷新视图，省去二次查询"""
         self._set_busy(False)
+        self._update_engine_status_and_tip()
         if policies is not None:
             families = scan_and_group_processes(policies)
             self.tree.update_data(families)
@@ -426,6 +456,9 @@ class MainWindow(QMainWindow):
 
     def _on_apply_limits(self):
         """批量应用速度限制或断网 (异步执行，单次 PowerShell 合并回读)"""
+        if hasattr(self, "_active_worker") and self._active_worker and self._active_worker.isRunning():
+            return
+
         targets = self.tree.get_selected_targets()
         if not targets:
             QMessageBox.information(self, "提示", "请先在列表中勾选想要限制的程序或家族！")
@@ -461,6 +494,9 @@ class MainWindow(QMainWindow):
 
     def _on_remove_selected(self):
         """取消选中程序的限制 (异步合并执行)"""
+        if hasattr(self, "_active_worker") and self._active_worker and self._active_worker.isRunning():
+            return
+
         targets = self.tree.get_selected_targets()
         if not targets:
             QMessageBox.information(self, "提示", "请先在列表中勾选想要解除限制的程序或家族！")
@@ -474,6 +510,9 @@ class MainWindow(QMainWindow):
 
     def _on_reset_all(self):
         """一键重置全部限制 (异步合并执行)"""
+        if hasattr(self, "_active_worker") and self._active_worker and self._active_worker.isRunning():
+            return
+
         reply = QMessageBox.question(
             self,
             "确认重置",
@@ -486,3 +525,32 @@ class MainWindow(QMainWindow):
             self._active_worker = AsyncWorker(self.engine.remove_all_limits)
             self._active_worker.finishedSignal.connect(self._on_async_policy_op_finished)
             self._active_worker.start()
+
+    def closeEvent(self, event):
+        """窗口关闭安全退出生命周期处理：终止定时器、回收异步 Worker、释放驱动资源"""
+        if hasattr(self, "scan_timer") and self.scan_timer.isActive():
+            self.scan_timer.stop()
+
+        if hasattr(self, "_scan_worker") and self._scan_worker and self._scan_worker.isRunning():
+            try:
+                self._scan_worker.finishedSignal.disconnect()
+            except Exception:
+                pass
+            self._scan_worker.quit()
+            self._scan_worker.wait(400)
+
+        if hasattr(self, "_active_worker") and self._active_worker and self._active_worker.isRunning():
+            try:
+                self._active_worker.finishedSignal.disconnect()
+            except Exception:
+                pass
+            self._active_worker.quit()
+            self._active_worker.wait(600)
+
+        try:
+            if hasattr(self, "engine") and self.engine:
+                self.engine.stop()
+        except Exception:
+            pass
+
+        event.accept()

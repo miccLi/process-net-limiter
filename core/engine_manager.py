@@ -94,3 +94,12 @@ class EngineManager:
 
     def speed_str_to_bps(self, speed_type: str, custom_val: float = 0, unit: str = "KB/s") -> int:
         return self.native_engine.speed_str_to_bps(speed_type, custom_val, unit)
+
+    def stop(self):
+        """安全停止并释放底层引擎资源与驱动线程"""
+        try:
+            if self.windivert_engine:
+                self.windivert_engine.stop()
+        except Exception as e:
+            logger.warning(f"停止 WinDivert 引擎时发生异常: {e}")
+
