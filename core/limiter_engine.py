@@ -24,6 +24,16 @@ ASSOCIATED_PROCESSES = {
     "qq.exe": ["qqprotect.exe"],
 }
 
+# 系统核心关键进程保护名单 (禁止限速与阻断，防止误操作导致整机断网或系统崩溃)
+SYSTEM_PROTECTED_EXES = {
+    "system", "system idle process", "registry", "smss.exe", "csrss.exe",
+    "wininit.exe", "services.exe", "lsass.exe", "svchost.exe", "fontdrvhost.exe",
+    "dwm.exe", "memory compression", "spoolsv.exe", "explorer.exe",
+    "winlogon.exe", "taskhostw.exe", "runtimebroker.exe", "sihost.exe",
+    "ctfmon.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe",
+    "conhost.exe"
+}
+
 @dataclass
 class PolicyStatus:
     app_name: str
@@ -223,6 +233,18 @@ Write-Output "---POLICY_JSON_END---"
         if not requests:
             return True, "未指定待配置的程序", self.cached_policies
 
+        # 0. 过滤系统核心保护进程，防止误操作
+        valid_requests = []
+        for req in requests:
+            clean = req.app_name.strip()
+            if clean.lower() in SYSTEM_PROTECTED_EXES:
+                print(f"[安全拦截] 忽略对系统核心保护进程 '{clean}' 的限速或阻断操作")
+                continue
+            valid_requests.append(req)
+
+        if not valid_requests:
+            return True, "所选程序均为系统核心保护进程或未指定程序", self.cached_policies
+
         commands = [
             "# 确保非域网络 (Home/Workgroup) 下 Policy-based QoS 生效",
             "if (-not (Test-Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\QoS')) { New-Item -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\QoS' -Force | Out-Null }",
@@ -231,17 +253,20 @@ Write-Output "---POLICY_JSON_END---"
 
         # 自动展开关联子进程并解析其真实执行路径
         expanded_targets = []
-        for req in requests:
+        for req in valid_requests:
             clean_app = req.app_name.strip()
             app_lower = clean_app.lower()
             main_path = req.app_path or self.get_process_exe_path(clean_app)
             expanded_targets.append((clean_app, main_path, req))
             if app_lower in ASSOCIATED_PROCESSES:
                 for sub_app in ASSOCIATED_PROCESSES[app_lower]:
+                    if sub_app.lower() in SYSTEM_PROTECTED_EXES:
+                        continue
                     sub_path = self.get_process_exe_path(sub_app)
                     expanded_targets.append((sub_app, sub_path, req))
 
         for clean_app, app_path, req in expanded_targets:
+            escaped_app = clean_app.replace("'", "''")
             safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
             
             up_bps = self.speed_str_to_bps(req.upload_speed_type, req.custom_upload_val, req.custom_upload_unit)
@@ -257,20 +282,26 @@ Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}*' -ErrorAction Silen
 
             # 检查是否为“完全断开连接” (使用 Windows 内核防火墙强力阻断入站与出站)
             if req.upload_speed_type == "block" or req.download_speed_type == "block":
-                prog_arg = f"-Program '{app_path}'" if (app_path and os.path.exists(app_path)) else ""
+                target_exe = app_path if (app_path and os.path.exists(app_path)) else self.get_process_exe_path(clean_app)
+                if not target_exe or not os.path.exists(target_exe):
+                    # 关键安全防护：严禁创建不带 -Program 的全局防火墙阻断规则，否则会导致整机网络瘫痪！
+                    print(f"[安全跳过] 无法定位程序 '{clean_app}' 的有效可执行文件路径，跳过防火墙阻断规则下发以防止整机断网。")
+                    continue
+
+                escaped_prog = target_exe.replace("'", "''")
                 commands.append(f"""
-New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_Out' -Direction Outbound -Action Block {prog_arg} -Description 'ProcessNetLimiter 阻断规则' -ErrorAction SilentlyContinue | Out-Null
-New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Direction Inbound -Action Block {prog_arg} -Description 'ProcessNetLimiter 阻断规则' -ErrorAction SilentlyContinue | Out-Null
+New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_Out' -Direction Outbound -Action Block -Program '{escaped_prog}' -Description 'ProcessNetLimiter 阻断规则 ({escaped_app})' -ErrorAction SilentlyContinue | Out-Null
+New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Direction Inbound -Action Block -Program '{escaped_prog}' -Description 'ProcessNetLimiter 阻断规则 ({escaped_app})' -ErrorAction SilentlyContinue | Out-Null
                 """)
             else:
-                # QoS 速度限制
+                # QoS 速度限制 (使用转义后的 escaped_app 防止命令注入)
                 if up_bps > 0 and (up_bps == dl_bps):
-                    commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}ALL_{safe_name}' -AppPathNameMatchCondition '{clean_app}' -ThrottleRateActionBitsPerSecond {up_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
+                    commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}ALL_{safe_name}' -AppPathNameMatchCondition '{escaped_app}' -ThrottleRateActionBitsPerSecond {up_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
                 else:
                     if up_bps > 0:
-                        commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}UP_{safe_name}' -AppPathNameMatchCondition '{clean_app}' -ThrottleRateActionBitsPerSecond {up_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
+                        commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}UP_{safe_name}' -AppPathNameMatchCondition '{escaped_app}' -ThrottleRateActionBitsPerSecond {up_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
                     if dl_bps > 0:
-                        commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}DL_{safe_name}' -AppPathNameMatchCondition '{clean_app}' -ThrottleRateActionBitsPerSecond {dl_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
+                        commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}DL_{safe_name}' -AppPathNameMatchCondition '{escaped_app}' -ThrottleRateActionBitsPerSecond {dl_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
 
         # 追加策略查询，单次执行搞定！
         commands.append(self.get_query_policies_ps_script())

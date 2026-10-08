@@ -10,7 +10,7 @@ import threading
 import logging
 import psutil
 from dataclasses import dataclass
-from core.limiter_engine import PolicyStatus, LimitRequest, ASSOCIATED_PROCESSES
+from core.limiter_engine import PolicyStatus, LimitRequest, ASSOCIATED_PROCESSES, SYSTEM_PROTECTED_EXES
 
 logger = logging.getLogger("WinDivertEngine")
 
@@ -149,6 +149,10 @@ class WinDivertEngine:
                 clean_name = req.app_name.strip()
                 clean_lower = clean_name.lower()
 
+                if clean_lower in SYSTEM_PROTECTED_EXES:
+                    logger.warning(f"安全拦截：忽略对系统核心保护进程 '{clean_name}' 的限速操作")
+                    continue
+
                 up_bps = self.speed_str_to_bps(req.upload_speed_type, req.custom_upload_val, req.custom_upload_unit)
                 dl_bps = self.speed_str_to_bps(req.download_speed_type, req.custom_download_val, req.custom_download_unit)
 
@@ -188,6 +192,8 @@ class WinDivertEngine:
                 if clean_lower in ASSOCIATED_PROCESSES:
                     for sub_app in ASSOCIATED_PROCESSES[clean_lower]:
                         sub_lower = sub_app.strip().lower()
+                        if sub_lower in SYSTEM_PROTECTED_EXES:
+                            continue
                         self.rules[sub_lower] = rule
 
             # 更新端口映射

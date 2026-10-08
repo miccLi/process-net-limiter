@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import unittest
 from core.process_scanner import (
-    classify_process, scan_and_group_processes, ProcessCategory, KNOWN_FAMILIES
+    classify_process, scan_and_group_processes, ProcessCategory, KNOWN_FAMILIES, SYSTEM_PROTECTED_EXES
 )
 from core.limiter_engine import PolicyStatus
 
@@ -23,6 +23,13 @@ class TestProcessScanner(unittest.TestCase):
         fam_id, fam_name = KNOWN_FAMILIES["filesynchelper.exe"]
         self.assertEqual(fam_id, "OneDrive")
 
+    def test_system_protected_processes(self):
+        self.assertIn("svchost.exe", SYSTEM_PROTECTED_EXES)
+        self.assertIn("system", SYSTEM_PROTECTED_EXES)
+        self.assertIn("explorer.exe", SYSTEM_PROTECTED_EXES)
+        self.assertNotIn("chrome.exe", SYSTEM_PROTECTED_EXES)
+        self.assertNotIn("steam.exe", SYSTEM_PROTECTED_EXES)
+
     def test_scan_and_group_structure(self):
         mock_policies = {
             "onedrive.exe": PolicyStatus(app_name="OneDrive.exe", upload_bps=8192, download_bps=8192, summary="1 KB/s")
@@ -37,6 +44,13 @@ class TestProcessScanner(unittest.TestCase):
             self.assertTrue(onedrive_fam.is_limited)
             self.assertEqual(onedrive_fam.sort_priority, -1)
             self.assertEqual(families[0].sort_priority, -1)
+
+        # Check that protected processes exist and have is_protected=True
+        protected_fams = [f for f in families if f.is_protected]
+        self.assertGreater(len(protected_fams), 0)
+        for fam in protected_fams:
+            for child in fam.children:
+                self.assertTrue(child.is_protected)
 
 if __name__ == "__main__":
     unittest.main()

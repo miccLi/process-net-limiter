@@ -143,7 +143,11 @@ class ProcessTreeWidget(QTreeWidget):
             # 复选框 (Column 0)
             cb = QCheckBox()
             cb.setChecked(fam.selected)
-            cb.stateChanged.connect(lambda state, f=fam, item=fam_item: self._on_family_checkbox_changed(f, item, state))
+            if fam.is_protected:
+                cb.setEnabled(False)
+                cb.setToolTip("系统核心保护进程，已锁定禁止限制网络")
+            else:
+                cb.stateChanged.connect(lambda state, f=fam, item=fam_item: self._on_family_checkbox_changed(f, item, state))
             self.setItemWidget(fam_item, COL_CHECK, self._wrap_checkbox(cb))
 
             # 家族名称 (Column 1)
@@ -195,7 +199,11 @@ class ProcessTreeWidget(QTreeWidget):
 
                     child_cb = QCheckBox()
                     child_cb.setChecked(child.selected)
-                    child_cb.stateChanged.connect(lambda state, c=child, f=fam, p_item=fam_item: self._on_child_checkbox_changed(c, f, p_item, state))
+                    if child.is_protected:
+                        child_cb.setEnabled(False)
+                        child_cb.setToolTip("系统核心保护进程，已锁定禁止限制网络")
+                    else:
+                        child_cb.stateChanged.connect(lambda state, c=child, f=fam, p_item=fam_item: self._on_child_checkbox_changed(c, f, p_item, state))
                     self.setItemWidget(child_item, COL_CHECK, self._wrap_checkbox(child_cb))
 
                     child_item.setText(COL_NAME, f"↳ {child.name}")
@@ -271,20 +279,30 @@ class ProcessTreeWidget(QTreeWidget):
         widget = self.itemWidget(item, COL_CHECK)
         if widget:
             cb = widget.findChild(QCheckBox)
-            if cb:
+            if cb and cb.isEnabled():
                 cb.setChecked(not cb.isChecked())
 
     def select_all(self, selected: bool):
-        for fam in self.families_data:
+        # 仅对当前筛选展示的项生效，且自动跳过系统保护进程
+        for fam in self.displayed_families:
+            if selected and fam.is_protected:
+                continue
             fam.selected = selected
             for c in fam.children:
+                if selected and c.is_protected:
+                    continue
                 c.selected = selected
         self._render_tree()
 
     def invert_selection(self):
-        for fam in self.families_data:
+        # 仅对当前筛选展示的项生效，且跳过系统保护进程
+        for fam in self.displayed_families:
+            if fam.is_protected:
+                continue
             fam.selected = not fam.selected
             for c in fam.children:
+                if c.is_protected:
+                    continue
                 c.selected = not c.selected
         self._render_tree()
 
@@ -292,6 +310,8 @@ class ProcessTreeWidget(QTreeWidget):
         targets = {}
         for fam in self.families_data:
             for child in fam.children:
+                if child.is_protected:
+                    continue
                 if child.selected or fam.selected:
                     name_key = child.name.lower()
                     if name_key not in targets:
@@ -299,5 +319,5 @@ class ProcessTreeWidget(QTreeWidget):
         return list(targets.values())
 
     def _emit_selected_count(self):
-        count = sum(1 for f in self.families_data if f.selected or any(c.selected for c in f.children))
+        count = sum(1 for f in self.families_data if (f.selected and not f.is_protected) or any(c.selected and not c.is_protected for c in f.children))
         self.selectionChangedCustom.emit(count)

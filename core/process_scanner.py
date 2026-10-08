@@ -10,7 +10,7 @@ import re
 import psutil
 from dataclasses import dataclass, field
 from enum import Enum
-from core.limiter_engine import PolicyStatus
+from core.limiter_engine import PolicyStatus, SYSTEM_PROTECTED_EXES
 
 class ProcessCategory(Enum):
     DOWNLOADER = ("下载器", "⚡", "#8b5cf6", 1)
@@ -97,6 +97,7 @@ class ProcessItem:
     is_limited: bool
     limit_summary: str
     sort_priority: int
+    is_protected: bool = False
     selected: bool = False
 
 @dataclass
@@ -109,6 +110,7 @@ class ProcessFamily:
     limit_summary: str = "正常"
     total_connections: int = 0
     sort_priority: int = 6
+    is_protected: bool = False
     selected: bool = False
 
 def classify_process(name: str, exe_path: str) -> ProcessCategory:
@@ -166,6 +168,7 @@ def scan_and_group_processes(active_policies: dict[str, PolicyStatus]) -> list[P
                     limit_summary = policy.summary or "已限速"
 
             category = classify_process(name, exe_path)
+            is_protected = (name.lower() in SYSTEM_PROTECTED_EXES)
 
             flat_items.append(ProcessItem(
                 pid=pid,
@@ -175,7 +178,8 @@ def scan_and_group_processes(active_policies: dict[str, PolicyStatus]) -> list[P
                 connections_count=conn_count,
                 is_limited=is_limited,
                 limit_summary=limit_summary,
-                sort_priority=category.priority
+                sort_priority=category.priority,
+                is_protected=is_protected
             ))
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
@@ -213,6 +217,7 @@ def scan_and_group_processes(active_policies: dict[str, PolicyStatus]) -> list[P
     family_list: list[ProcessFamily] = []
     for fam in families_dict.values():
         fam.total_connections = sum(c.connections_count for c in fam.children)
+        fam.is_protected = all(c.is_protected for c in fam.children)
         
         # 家族限速判定
         limited_children = [c for c in fam.children if c.is_limited]
