@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-WinDivert 内核级流量整形引擎
-- 基于微软数字签名的 WinDivert (WFP Callout) 内核驱动
-- 实现高精度微秒级令牌桶算法 (Token Bucket)
-- 支持毫秒级极速生效、入站/出站双向精确控速与游戏 UDP/TCP 全协议硬件级截流
+WinDivert 内核级流量整形引擎 (高精度无阻塞延迟调度架构)
+- 基于微软合规数字签名的 WinDivert (WFP Callout) 内核驱动
+- 微秒级无锁令牌桶算法 (Token Bucket) 与独立 Pacer 延迟队列
+- 彻底移除收包主循环中的同步 sleep，杜绝拖慢系统全局网络时延
+- 严格受控的工作线程生命周期：显式句柄注销、无竞态启停
+- 真实驱动可用性探测与多重异常降级护栏
 """
 import time
+import queue
 import threading
 import logging
 import psutil
@@ -13,6 +16,7 @@ from dataclasses import dataclass
 from core.limiter_engine import PolicyStatus, LimitRequest, ASSOCIATED_PROCESSES, SYSTEM_PROTECTED_EXES
 
 logger = logging.getLogger("WinDivertEngine")
+
 
 class TokenBucket:
     """高精度字节级令牌桶算法"""
@@ -83,15 +87,20 @@ class ProcessRule:
 
 class WinDivertEngine:
     """
-    WinDivert 内核流量整形引擎 (管理线程、端口追踪与数据包分发)
+    WinDivert 内核流量整形引擎 (管理线程、端口追踪、非阻塞队列与数据包分发)
     """
     def __init__(self):
         self.rules: dict[str, ProcessRule] = {}  # key: lower app name, e.g. "steam.exe"
-        self.port_to_rules: dict[int, ProcessRule] = {}  # key: local port
+        self.port_to_rules: dict[int, ProcessRule] = {}  # key: local port (原子替换，免锁读取)
         self._lock = threading.RLock()
         self._running = False
+        self._stop_event = threading.Event()
+        self._divert_handle = None
         self._divert_thread = None
         self._tracker_thread = None
+        self._pacer_thread = None
+        self._pacing_queue = queue.Queue(maxsize=300)
+        self._driver_last_error = ""
         self._pydivert_available = self._check_pydivert_available()
 
     @staticmethod
@@ -103,8 +112,23 @@ class WinDivertEngine:
             return False
 
     def is_driver_available(self) -> bool:
-        """检查 WinDivert 驱动模块与环境是否就绪"""
+        """检查 WinDivert 驱动模块与依赖库是否已成功安装"""
         return self._pydivert_available
+
+    def is_driver_functional(self) -> bool:
+        """真实测试当前权限下 WinDivert 内核驱动是否可以被打开使用"""
+        if not self._pydivert_available:
+            return False
+        try:
+            import pydivert
+            # 以匹配 false 快速测试打开与关闭，不捕获任何实际数据包
+            with pydivert.WinDivert("false"):
+                pass
+            return True
+        except Exception as e:
+            self._driver_last_error = str(e)
+            logger.debug(f"WinDivert 驱动功能探测失败: {e}")
+            return False
 
     def get_active_policies(self) -> dict[str, PolicyStatus]:
         """获取当前正在生效的活动限速策略 (微秒级内存回读)"""
@@ -140,7 +164,7 @@ class WinDivertEngine:
         return 0
 
     def apply_limits_batch(self, requests: list[LimitRequest]) -> tuple[bool, str, dict[str, PolicyStatus]]:
-        """批量下发限速与阻断策略 (毫秒级内存生效并启动内核抓包线程)"""
+        """批量下发限速与阻断策略 (毫秒级生效并启动内核抓包与异步整形线程)"""
         if not requests:
             return True, "未指定待配置的程序", self.get_active_policies()
 
@@ -197,10 +221,12 @@ class WinDivertEngine:
                         self.rules[sub_lower] = rule
 
             # 更新端口映射
-            self._update_port_mapping_locked()
+            self._scan_and_update_ports()
 
-            # 确保抓包与跟踪线程处于运行状态
-            self._ensure_workers_running()
+            # 启动抓包、整形与端口跟踪后台工作线程
+            ok, err = self._ensure_workers_running()
+            if not ok:
+                return False, f"WinDivert 驱动启动失败: {err}", self.get_active_policies()
 
         return True, f"已通过 WinDivert 内核引擎成功为 {len(requests)} 个程序下发精准限速规则", self.get_active_policies()
 
@@ -214,7 +240,7 @@ class WinDivertEngine:
                     for sub_app in ASSOCIATED_PROCESSES[clean_lower]:
                         self.rules.pop(sub_app.strip().lower(), None)
 
-            self._update_port_mapping_locked()
+            self._scan_and_update_ports()
             if not self.rules:
                 self.stop()
 
@@ -224,29 +250,88 @@ class WinDivertEngine:
         """一键清除全部限速规则"""
         with self._lock:
             self.rules.clear()
-            self.port_to_rules.clear()
+            self.port_to_rules = {}
             self.stop()
 
         return True, "已一键清除所有内核限速策略", {}
 
     def stop(self):
-        """停止后台抓包与端口监控线程"""
+        """显式安全停止后台抓包、延迟队列与端口监控工作线程"""
         self._running = False
+        self._stop_event.set()
 
-    def _ensure_workers_running(self):
-        if not self._running:
-            self._running = True
-            self._tracker_thread = threading.Thread(target=self._tracker_loop, daemon=True, name="FlowTracker")
-            self._tracker_thread.start()
-            self._divert_thread = threading.Thread(target=self._divert_loop, daemon=True, name="WinDivertWorker")
-            self._divert_thread.start()
+        # 主动关闭底层 WinDivert 句柄，立即中断阻塞在 recv() 处的系统调用
+        if self._divert_handle is not None:
+            try:
+                self._divert_handle.close()
+            except Exception:
+                pass
+            self._divert_handle = None
 
-    def _update_port_mapping_locked(self):
-        """扫描活动连接并更新 本地端口 -> ProcessRule 的极速哈希映射表"""
-        new_port_map: dict[int, ProcessRule] = {}
+        # 安全回收工作线程
+        for th in [self._divert_thread, self._pacer_thread, self._tracker_thread]:
+            if th and th.is_alive():
+                try:
+                    th.join(timeout=0.4)
+                except Exception:
+                    pass
+
+        self._divert_thread = None
+        self._pacer_thread = None
+        self._tracker_thread = None
+
+        # 清空延迟调度队列
+        while not self._pacing_queue.empty():
+            try:
+                self._pacing_queue.get_nowait()
+            except Exception:
+                break
+
+    def _ensure_workers_running(self) -> tuple[bool, str]:
+        """确保工作线程平稳启动；若已在运行则保持，若未运行则初始化并校验驱动"""
+        if self._running and self._divert_thread and self._divert_thread.is_alive():
+            return True, ""
+
+        # 启动前先停止任何遗留状态
+        self.stop()
+
+        self._running = True
+        self._stop_event.clear()
+
+        # 启动端口扫描跟踪线程
+        self._tracker_thread = threading.Thread(target=self._tracker_loop, daemon=True, name="FlowTracker")
+        self._tracker_thread.start()
+
+        # 启动延迟发送整形队列线程 (Pacer)
+        self._pacer_thread = threading.Thread(target=self._pacer_loop, daemon=True, name="WinDivertPacer")
+        self._pacer_thread.start()
+
+        # 启动核心拦截分发线程
+        ready_event = threading.Event()
+        start_error = []
+
+        self._divert_thread = threading.Thread(
+            target=self._divert_loop,
+            args=(ready_event, start_error),
+            daemon=True,
+            name="WinDivertWorker"
+        )
+        self._divert_thread.start()
+
+        # 等待驱动句柄初始化就绪 (最多等待 0.8s)
+        ready_event.wait(timeout=0.8)
+        if start_error:
+            self.stop()
+            return False, start_error[0]
+
+        return True, ""
+
+    def _scan_and_update_ports(self):
+        """扫描活动连接并在锁外构建端口映射表，实现极速原子赋值"""
         try:
-            # 建立 pid -> rule 索引
-            target_names = set(self.rules.keys())
+            with self._lock:
+                target_names = set(self.rules.keys())
+
             if not target_names:
                 self.port_to_rules = {}
                 return
@@ -255,89 +340,143 @@ class WinDivertEngine:
             for p in psutil.process_iter(['pid', 'name']):
                 try:
                     pname = (p.info['name'] or '').lower()
-                    if pname in self.rules:
-                        pids_to_rules[p.info['pid']] = self.rules[pname]
+                    if pname in target_names:
+                        with self._lock:
+                            rule = self.rules.get(pname)
+                        if rule:
+                            pids_to_rules[p.info['pid']] = rule
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
 
-            # 遍历所有网络连接 (耗时约 2ms)
+            new_port_map: dict[int, ProcessRule] = {}
             for c in psutil.net_connections(kind='all'):
                 if c.pid and c.pid in pids_to_rules:
                     if c.laddr and hasattr(c.laddr, 'port') and c.laddr.port > 0:
                         new_port_map[c.laddr.port] = pids_to_rules[c.pid]
 
+            # 原子指针替换，工作收包线程读取时绝对免锁！
             self.port_to_rules = new_port_map
         except Exception as e:
             logger.debug(f"更新端口映射异常: {e}")
 
     def _tracker_loop(self):
         """后台轮询线程：周期性扫描新建立的动态端口，确保多线程并发连接无缝纳入管控"""
-        while self._running:
+        while self._running and not self._stop_event.is_set():
             try:
                 with self._lock:
-                    if not self.rules:
-                        break
-                    self._update_port_mapping_locked()
+                    has_rules = bool(self.rules)
+                if not has_rules:
+                    break
+                self._scan_and_update_ports()
             except Exception:
                 pass
-            time.sleep(0.3)  # 每 300ms 刷新一次端口表
+            time.sleep(0.3)
 
-    def _divert_loop(self):
-        """WinDivert 核心数据包拦截与令牌桶整形循环"""
+    def _pacer_loop(self):
+        """
+        独立延迟发送整形线程 (Pacer)：
+        专用处理被限速数据包的微秒级平滑延迟放行，彻底消除主收包线程的时延阻塞
+        """
+        while self._running and not self._stop_event.is_set():
+            try:
+                item = self._pacing_queue.get(timeout=0.02)
+            except queue.Empty:
+                continue
+            except Exception:
+                break
+
+            send_at, packet = item
+            now = time.perf_counter()
+            wait_left = send_at - now
+            if wait_left > 0:
+                time.sleep(min(wait_left, 0.05))
+
+            handle = self._divert_handle
+            if handle is not None and self._running:
+                try:
+                    handle.send(packet)
+                except Exception:
+                    pass
+
+    def _divert_loop(self, ready_event: threading.Event, start_error: list):
+        """
+        WinDivert 核心数据包拦截与高速分发循环：
+        - 严禁任何 sleep 阻塞！
+        - 非受限数据包直接 0 延迟放行，保证全系统其他程序网络毫秒级畅通
+        - 受限数据包根据令牌桶状态直接放行或提交延迟队列
+        """
         try:
             import pydivert
-        except ImportError:
+        except ImportError as e:
+            start_error.append(str(e))
+            ready_event.set()
             return
 
         filter_str = "!loopback and (tcp or udp)"
+        divert = None
         try:
-            with pydivert.WinDivert(filter_str) as divert:
-                while self._running:
-                    try:
-                        packet = divert.recv()
-                        if packet is None:
-                            continue
-
-                        # 匹配数据包端口
-                        rule = None
-                        is_outbound = packet.is_outbound
-                        port_to_check = packet.src_port if is_outbound else packet.dst_port
-
-                        with self._lock:
-                            rule = self.port_to_rules.get(port_to_check)
-
-                        # 若非受限进程的数据包，立即 0 延迟重注入放行
-                        if not rule:
-                            divert.send(packet)
-                            continue
-
-                        # 检查完全阻断
-                        if rule.is_blocked:
-                            # 丢弃数据包 (直接不调用 divert.send)
-                            continue
-
-                        # 令牌桶整形判定
-                        bucket = rule.up_bucket if is_outbound else rule.dl_bucket
-                        pkt_len = len(packet.raw) if hasattr(packet, 'raw') and packet.raw else 1500
-
-                        allowed, wait_sec = bucket.consume(pkt_len)
-                        if allowed:
-                            divert.send(packet)
-                        else:
-                            if wait_sec > 0 and wait_sec <= 0.05:
-                                # 极小延迟：微秒级休眠后放行，形成极其平滑的物理流量波形
-                                time.sleep(wait_sec)
-                                divert.send(packet)
-                            else:
-                                # 超出延迟上限：直接丢弃以迫使远端滑动窗口紧缩并维持 1KB/s 硬上限
-                                continue
-
-                    except Exception as e:
-                        # 避免单包异常打断整个循环
-                        if not self._running:
-                            break
-                        continue
+            divert = pydivert.WinDivert(filter_str)
+            divert.open()
+            self._divert_handle = divert
+            ready_event.set()
         except Exception as e:
-            logger.error(f"WinDivert 运行时异常: {e}")
+            start_error.append(str(e))
+            self._driver_last_error = str(e)
+            logger.error(f"WinDivert 打开句柄异常: {e}")
+            ready_event.set()
+            return
+
+        try:
+            while self._running and not self._stop_event.is_set():
+                try:
+                    packet = divert.recv()
+                    if packet is None:
+                        continue
+
+                    # 极速哈希匹配端口 (读取原子字典，零锁争用)
+                    is_outbound = packet.is_outbound
+                    port_to_check = packet.src_port if is_outbound else packet.dst_port
+                    rule = self.port_to_rules.get(port_to_check)
+
+                    # 若非受限进程数据包：立即 0 延迟重注入放行！
+                    if not rule:
+                        divert.send(packet)
+                        continue
+
+                    # 若规则为“完全阻断”：直接丢弃 (不 send)
+                    if rule.is_blocked:
+                        continue
+
+                    # 令牌桶消耗判定
+                    bucket = rule.up_bucket if is_outbound else rule.dl_bucket
+                    pkt_len = len(packet.raw) if hasattr(packet, 'raw') and packet.raw else 1500
+
+                    allowed, wait_sec = bucket.consume(pkt_len)
+                    if allowed:
+                        divert.send(packet)
+                    else:
+                        if wait_sec > 0 and wait_sec <= 0.05:
+                            # 将延迟数据包异步推送到 Pacer 队列，收包线程绝不等待！
+                            try:
+                                self._pacing_queue.put_nowait((time.perf_counter() + wait_sec, packet))
+                            except queue.Full:
+                                # 队列满时丢弃，有效触发 TCP 拥塞控制滑动窗口紧缩
+                                continue
+                        else:
+                            # 超出延迟阈值丢弃，锁定硬速率上限
+                            continue
+
+                except Exception:
+                    if not self._running or self._stop_event.is_set():
+                        break
+                    continue
+        except Exception as e:
+            logger.error(f"WinDivert 循环退出: {e}")
         finally:
+            if divert is not None:
+                try:
+                    divert.close()
+                except Exception:
+                    pass
+            self._divert_handle = None
             self._running = False

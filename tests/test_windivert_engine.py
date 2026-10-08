@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from unittest.mock import patch, MagicMock
 import unittest
 import time
 from core.windivert_engine import TokenBucket, WinDivertEngine
@@ -36,7 +37,8 @@ class TestWinDivertEngine(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertAlmostEqual(wait, 276.0 / 1024.0, places=3)
 
-    def test_windivert_engine_batch_rules(self):
+    @patch.object(WinDivertEngine, "_ensure_workers_running", return_value=(True, ""))
+    def test_windivert_engine_batch_rules(self, mock_workers):
         engine = WinDivertEngine()
         self.assertTrue(engine.is_driver_available())
 
@@ -60,6 +62,18 @@ class TestWinDivertEngine(unittest.TestCase):
         ok2, msg2, policies2 = engine.remove_limits_batch(["game.exe"])
         self.assertTrue(ok2)
         self.assertNotIn("game.exe", policies2)
+
+    def test_stop_lifecycle_cleanup(self):
+        """测试：停止引擎时能够干净重置运行标志并清空队列"""
+        engine = WinDivertEngine()
+        engine._running = True
+        engine._pacing_queue.put((time.perf_counter(), "mock_packet"))
+        
+        engine.stop()
+        
+        self.assertFalse(engine._running)
+        self.assertTrue(engine._stop_event.is_set())
+        self.assertTrue(engine._pacing_queue.empty())
 
     def test_engine_manager_facade(self):
         mgr = EngineManager()

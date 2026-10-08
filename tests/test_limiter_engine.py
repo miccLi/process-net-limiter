@@ -91,5 +91,36 @@ class TestLimiterEngine(unittest.TestCase):
         # 且带有明确的 -Program
         self.assertIn("-Program 'C:\\Program Files\\test''dir\\test''app.exe'", script_called)
 
+    def test_unicode_safe_rule_names_no_collision(self):
+        """测试：不同中文应用名称生成的规则名互不相同，彻底杜绝冲突"""
+        name_wechat = self.engine.get_safe_rule_name("微信.exe")
+        name_thunder = self.engine.get_safe_rule_name("迅雷.exe")
+        
+        self.assertNotEqual(name_wechat, name_thunder)
+        self.assertTrue(name_wechat.startswith("app_"))
+        self.assertTrue(name_thunder.startswith("app_"))
+
+    def test_parse_firewall_metadata_unicode(self):
+        """测试：从防火墙规则的 Description [app=xxx] 中正确还原非 ASCII/中文应用名"""
+        raw_output = """
+---POLICY_JSON_START---
+{
+    "QoS": [],
+    "Firewall": [
+        {
+            "DisplayName": "NetLimit_Block_app_12345678_Out",
+            "Direction": 2,
+            "Action": 4,
+            "Description": "ProcessNetLimiter 阻断规则 [app=微信.exe]"
+        }
+    ]
+}
+---POLICY_JSON_END---
+"""
+        policies = self.engine.parse_policies_from_output(raw_output)
+        self.assertIn("微信.exe", policies)
+        self.assertTrue(policies["微信.exe"].is_blocked)
+        self.assertEqual(policies["微信.exe"].summary, "⛔ 完全断网")
+
 if __name__ == "__main__":
     unittest.main()

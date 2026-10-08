@@ -9,6 +9,7 @@
 import re
 import json
 import os
+import hashlib
 from dataclasses import dataclass
 from core.uac_manager import run_powershell_script
 
@@ -96,6 +97,17 @@ class LimiterEngine:
         return 0  # 0 为不限制
 
     @staticmethod
+    def get_safe_rule_name(app_name: str) -> str:
+        """生成唯一且合规的策略名称标识，彻底解决中文、空格及特殊字符冲突"""
+        clean = app_name.strip()
+        name_hash = hashlib.md5(clean.lower().encode("utf-8")).hexdigest()[:8]
+        base_name = re.sub(r'\.exe$', '', clean, flags=re.IGNORECASE)
+        clean_ascii = re.sub(r'[^a-zA-Z0-9_\-]', '_', base_name)[:16].strip('_')
+        if not clean_ascii:
+            clean_ascii = "app"
+        return f"{clean_ascii}_{name_hash}"
+
+    @staticmethod
     def get_query_policies_ps_script() -> str:
         """生成查询当前所有活动策略的 PowerShell 脚本片段"""
         return f"""
@@ -103,7 +115,7 @@ $qos1 = Get-NetQosPolicy -PolicyStore ActiveStore -ErrorAction SilentlyContinue 
 $qos2 = Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -like '{QOS_PREFIX}*' }}
 $allQos = @($qos1) + @($qos2) | Select-Object -Unique Name, AppPathNameMatchCondition, ThrottleRateAction, ThrottleRateActionBitsPerSecond
 
-$fw = Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -like '{FW_PREFIX}*' }} | Select-Object DisplayName, Direction, Action
+$fw = Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -like '{FW_PREFIX}*' }} | Select-Object DisplayName, Direction, Action, Description
 
 Write-Output "---POLICY_JSON_START---"
 [PSCustomObject]@{{
@@ -191,13 +203,22 @@ Write-Output "---POLICY_JSON_END---"
 
             for item in fw_list:
                 dname = str(item.get("DisplayName") or "")
+                desc = str(item.get("Description") or "")
                 if dname.startswith(FW_PREFIX):
-                    raw_name = dname[len(FW_PREFIX):]
-                    app_name = re.sub(r'_(Out|In)$', '', raw_name)
-                    app_name_lower = app_name.lower()
-                    if app_name_lower not in results:
-                        results[app_name_lower] = PolicyStatus(app_name=app_name)
-                    results[app_name_lower].is_blocked = True
+                    app_name = ""
+                    # 优先从 Description 中的 [app=xxx] 读取原始程序名称 (支持中文与特殊字符)
+                    match = re.search(r'\[app=(.*?)\]', desc)
+                    if match:
+                        app_name = match.group(1).strip()
+                    else:
+                        raw_name = dname[len(FW_PREFIX):]
+                        app_name = re.sub(r'_(Out|In)$', '', raw_name)
+
+                    if app_name:
+                        app_name_lower = app_name.lower()
+                        if app_name_lower not in results:
+                            results[app_name_lower] = PolicyStatus(app_name=app_name)
+                        results[app_name_lower].is_blocked = True
 
             # 3. 构造显示摘要 (安全防 None)
             for status in results.values():
@@ -267,17 +288,20 @@ Write-Output "---POLICY_JSON_END---"
 
         for clean_app, app_path, req in expanded_targets:
             escaped_app = clean_app.replace("'", "''")
-            safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
+            safe_name = self.get_safe_rule_name(clean_app)
+            legacy_safe = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
             
             up_bps = self.speed_str_to_bps(req.upload_speed_type, req.custom_upload_val, req.custom_upload_unit)
             dl_bps = self.speed_str_to_bps(req.download_speed_type, req.custom_download_val, req.custom_download_unit)
 
-            # 清理该程序的旧策略
+            # 清理该程序的旧策略 (同时清理哈希唯一命名与兼容旧版本命名)
             commands.append(f"""
 Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
-Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{legacy_safe}' -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetQosPolicy -Name '{QOS_PREFIX}{safe_name}' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetQosPolicy -Name '{QOS_PREFIX}{legacy_safe}' -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}*' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{legacy_safe}*' -ErrorAction SilentlyContinue
             """)
 
             # 检查是否为“完全断开连接” (使用 Windows 内核防火墙强力阻断入站与出站)
@@ -290,8 +314,8 @@ Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}*' -ErrorAction Silen
 
                 escaped_prog = target_exe.replace("'", "''")
                 commands.append(f"""
-New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_Out' -Direction Outbound -Action Block -Program '{escaped_prog}' -Description 'ProcessNetLimiter 阻断规则 ({escaped_app})' -ErrorAction SilentlyContinue | Out-Null
-New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Direction Inbound -Action Block -Program '{escaped_prog}' -Description 'ProcessNetLimiter 阻断规则 ({escaped_app})' -ErrorAction SilentlyContinue | Out-Null
+New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_Out' -Direction Outbound -Action Block -Program '{escaped_prog}' -Description 'ProcessNetLimiter 阻断规则 [app={escaped_app}]' -ErrorAction SilentlyContinue | Out-Null
+New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Direction Inbound -Action Block -Program '{escaped_prog}' -Description 'ProcessNetLimiter 阻断规则 [app={escaped_app}]' -ErrorAction SilentlyContinue | Out-Null
                 """)
             else:
                 # QoS 速度限制 (使用转义后的 escaped_app 防止命令注入)
@@ -327,12 +351,15 @@ New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Direction Inbound 
 
         for app in set(all_apps):
             clean_app = app.strip()
-            safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
+            safe_name = self.get_safe_rule_name(clean_app)
+            legacy_safe = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', clean_app)
             commands.append(f"""
 Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
-Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{legacy_safe}' -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetQosPolicy -Name '{QOS_PREFIX}{safe_name}' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetQosPolicy -Name '{QOS_PREFIX}{legacy_safe}' -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}*' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{legacy_safe}*' -ErrorAction SilentlyContinue
             """)
 
         commands.append(self.get_query_policies_ps_script())
