@@ -107,6 +107,7 @@ python run_tests.py
 
 ---
 
-## 📄 开源许可证
+## 📄 开源许可证与第三方组件
 
-本项目基于 [MIT License](LICENSE) 协议开源，允许任何个人或组织自由用于学习、二次开发或商业用途。
+- 本项目主体基于 [MIT License](LICENSE) 协议开源，允许自由用于学习、二次开发或商业用途；
+- 内核流量整形模块依托 [WinDivert](https://reqrypt.org/windivert.html) 驱动（遵循 LGPLv3 / GPLv2 双许可协议），由 PyPI `pydivert` 官方包合规打包引入。

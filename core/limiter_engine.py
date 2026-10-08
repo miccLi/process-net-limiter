@@ -12,6 +12,7 @@ import os
 import hashlib
 from dataclasses import dataclass
 from core.uac_manager import run_powershell_script
+from core.speed_utils import speed_str_to_bps as util_speed_str_to_bps, format_policy_summary
 
 QOS_PREFIX = "NetLimit_QoS_"
 FW_PREFIX = "NetLimit_Block_"
@@ -78,23 +79,7 @@ class LimiterEngine:
     @staticmethod
     def speed_str_to_bps(speed_type: str, custom_val: float = 0, unit: str = "KB/s") -> int:
         """将选择的速度档位转换为每秒比特数 (bps)"""
-        if speed_type == "block":
-            return -1  # 防火墙完全阻断
-        elif speed_type == "1kb":
-            return 8192      # 1 KB/s = 8192 bps
-        elif speed_type == "100kb":
-            return 819200    # 100 KB/s = 819,200 bps
-        elif speed_type == "1000kb":
-            return 8192000   # 1000 KB/s (~1MB/s) = 8,192,000 bps
-        elif speed_type == "custom":
-            multiplier = 1024 * 8
-            if unit.upper() == "MB/S":
-                multiplier = 1024 * 1024 * 8
-            elif unit.upper() == "GB/S":
-                multiplier = 1024 * 1024 * 1024 * 8
-            bps = int(custom_val * multiplier)
-            return max(1000, bps)  # 最低 1000 bps
-        return 0  # 0 为不限制
+        return util_speed_str_to_bps(speed_type, custom_val, unit)
 
     @staticmethod
     def get_safe_rule_name(app_name: str) -> str:
@@ -222,17 +207,12 @@ Write-Output "---POLICY_JSON_END---"
 
             # 3. 构造显示摘要 (安全防 None)
             for status in results.values():
-                if status.is_blocked:
-                    status.summary = "⛔ 完全断网"
-                else:
-                    up_val = int(status.upload_bps or 0)
-                    dl_val = int(status.download_bps or 0)
-                    parts = []
-                    if up_val > 0:
-                        parts.append(f"上: {up_val // 8192} KB/s")
-                    if dl_val > 0:
-                        parts.append(f"下: {dl_val // 8192} KB/s")
-                    status.summary = " | ".join(parts) if parts else "已限速"
+                status.summary = format_policy_summary(
+                    is_blocked=status.is_blocked,
+                    up_bps=int(status.upload_bps or 0),
+                    dl_bps=int(status.download_bps or 0),
+                    block_tag="⛔ 完全断网"
+                )
 
         except Exception as e:
             print(f"解析活动策略日志: {e}")

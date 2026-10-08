@@ -14,6 +14,7 @@ import logging
 import psutil
 from dataclasses import dataclass
 from core.limiter_engine import PolicyStatus, LimitRequest, ASSOCIATED_PROCESSES, SYSTEM_PROTECTED_EXES
+from core.speed_utils import speed_str_to_bps as util_speed_str_to_bps, format_policy_summary
 
 logger = logging.getLogger("WinDivertEngine")
 
@@ -145,23 +146,7 @@ class WinDivertEngine:
             return results
 
     def speed_str_to_bps(self, speed_type: str, custom_val: float = 0, unit: str = "KB/s") -> int:
-        if speed_type == "block":
-            return -1
-        elif speed_type == "1kb":
-            return 8192
-        elif speed_type == "100kb":
-            return 819200
-        elif speed_type == "1000kb":
-            return 8192000
-        elif speed_type == "custom":
-            multiplier = 1024 * 8
-            if unit.upper() == "MB/S":
-                multiplier = 1024 * 1024 * 8
-            elif unit.upper() == "GB/S":
-                multiplier = 1024 * 1024 * 1024 * 8
-            bps = int(custom_val * multiplier)
-            return max(1000, bps)
-        return 0
+        return util_speed_str_to_bps(speed_type, custom_val, unit)
 
     def apply_limits_batch(self, requests: list[LimitRequest]) -> tuple[bool, str, dict[str, PolicyStatus]]:
         """批量下发限速与阻断策略 (毫秒级生效并启动内核抓包与异步整形线程)"""
@@ -187,15 +172,12 @@ class WinDivertEngine:
                 dl_bytes_sec = (dl_bps // 8) if dl_bps > 0 else 0
 
                 # 构造摘要文字
-                if is_blocked:
-                    summary = "⛔ 完全断网 (内核硬阻断)"
-                else:
-                    parts = []
-                    if up_bps > 0:
-                        parts.append(f"上: {up_bps // 8192} KB/s")
-                    if dl_bps > 0:
-                        parts.append(f"下: {dl_bps // 8192} KB/s")
-                    summary = " | ".join(parts) if parts else "已限速"
+                summary = format_policy_summary(
+                    is_blocked=is_blocked,
+                    up_bps=up_bps,
+                    dl_bps=dl_bps,
+                    block_tag="⛔ 完全断网 (内核硬阻断)"
+                )
 
                 up_bucket = TokenBucket(rate_bytes_per_sec=up_bytes_sec, is_blocked=is_blocked)
                 dl_bucket = TokenBucket(rate_bytes_per_sec=dl_bytes_sec, is_blocked=is_blocked)
