@@ -11,6 +11,7 @@ from core.limiter_engine import LimiterEngine, LimitRequest, PolicyStatus
 from core.windivert_engine import WinDivertEngine
 from core.uac_manager import is_admin
 from core.rules_store import RulesStore
+from core.network_compat import NetworkCompatManager, NetworkDiagnostic
 
 logger = logging.getLogger("EngineManager")
 
@@ -23,15 +24,32 @@ class EngineManager:
         self.rules_store = rules_store if rules_store is not None else RulesStore()
         self.traffic_monitor = self.windivert_engine.traffic_monitor
 
+        # 网络环境与兼容性诊断管理器
+        self.compat_manager = NetworkCompatManager()
+        self.diagnostic: NetworkDiagnostic = self.compat_manager.diagnose()
+
+        self.is_downgraded = False
+        self.downgrade_reason = ""
+
         # 严格校验：以管理员运行 且 驱动能够正常打开时才启用 WinDivert 内核引擎
-        self.use_windivert = is_admin() and self.windivert_engine.is_driver_functional()
+        if is_admin():
+            functional = self.windivert_engine.is_driver_functional()
+            if functional:
+                self.use_windivert = True
+            else:
+                self.use_windivert = False
+                self.is_downgraded = True
+                self.downgrade_reason = self.windivert_engine.driver_diag_advice or "驱动功能测试未通过"
+                logger.warning(f"WinDivert 驱动未就绪，自动降级至原生引擎: {self.downgrade_reason}")
+        else:
+            self.use_windivert = False
+            self.downgrade_reason = "需要管理员权限"
 
         # 启动时预热查询系统持久化规则 (防止遗留防火墙阻断无法在界面识别)
         try:
             self.native_engine.get_active_policies()
         except Exception:
             pass
-
 
     @property
     def active_engine_name(self) -> str:
@@ -41,6 +59,8 @@ class EngineManager:
     def active_engine_display(self) -> str:
         if self.use_windivert:
             return "🚀 内核驱动整形 (WinDivert 硬件级精准)"
+        if self.is_downgraded:
+            return "🛡️ 原生组策略引擎 (驱动受阻已自动降级)"
         return "🛡️ 原生组策略引擎 (Windows QoS 出站整形 + 防火墙)"
 
     def get_active_policies(self) -> dict[str, PolicyStatus]:
@@ -72,7 +92,7 @@ class EngineManager:
             # 若 WinDivert 初始化失败，自动平滑降级至 Native 引擎
             if not ok:
                 logger.warning(f"WinDivert 下发失败，自动平滑降级至原生引擎: {msg}")
-                self.use_windivert = False
+                self.fallback_to_native(msg)
                 return self.native_engine.apply_limits_batch(requests)
 
             # 3. 对其中“完全断开连接”的请求，同步下发 Windows 防火墙物理阻断，实现双重硬防
@@ -154,4 +174,33 @@ class EngineManager:
     def get_process_rates(self) -> dict[str, tuple[float, float]]:
         """获取各应用程序的实时上传与下载速率映射 (bytes/sec)"""
         return self.traffic_monitor.get_all_app_rates()
+
+    def fallback_to_native(self, reason: str = ""):
+        """触发平滑降级自愈，从 WinDivert 切换到原生 QoS/防火墙，并无缝同步现有规则"""
+        if not self.use_windivert and self.is_downgraded:
+            return
+        self.use_windivert = False
+        self.is_downgraded = True
+        self.downgrade_reason = reason or "内核驱动异常自动降级"
+        logger.warning(f"执行平滑降级至原生系统引擎: {self.downgrade_reason}")
+
+        try:
+            self.windivert_engine.stop()
+            if self.rules_store:
+                persisted_reqs = self.rules_store.get_all_requests()
+                if persisted_reqs:
+                    self.native_engine.apply_limits_batch(persisted_reqs)
+        except Exception as e:
+            logger.warning(f"规则迁移至原生引擎时发生异常: {e}")
+
+    def get_diagnostic_info(self) -> dict:
+        """获取综合引擎与网络兼容性诊断信息"""
+        return {
+            "active_engine": self.active_engine_name,
+            "is_downgraded": self.is_downgraded,
+            "downgrade_reason": self.downgrade_reason,
+            "driver_code": self.windivert_engine.driver_diag_code,
+            "driver_advice": self.windivert_engine.driver_diag_advice,
+            "network_diagnostic": self.diagnostic
+        }
 

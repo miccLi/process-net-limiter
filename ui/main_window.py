@@ -454,7 +454,7 @@ class MainWindow(QMainWindow):
             self.apply_btn.setText(t("btn_apply"))
 
     def _update_engine_status_and_tip(self):
-        """根据当前激活引擎动态更新顶部徽章与底部说明文案"""
+        """根据当前激活引擎与兼容性诊断动态更新顶部徽章与底部说明文案"""
         if not hasattr(self, "engine_badge") or not hasattr(self, "tip_label"):
             return
         self.engine_badge.setText(self.engine.active_engine_display)
@@ -463,13 +463,28 @@ class MainWindow(QMainWindow):
                 "background-color: #0c4a6e; color: #38bdf8; border: 1px solid #0284c7; "
                 "padding: 4px 12px; border-radius: 14px; font-weight: bold; font-size: 11px;"
             )
-            self.tip_label.setText(t("engine_tip_windivert"))
+            tip_msg = t("engine_tip_windivert")
+        elif getattr(self.engine, "is_downgraded", False):
+            self.engine_badge.setStyleSheet(
+                "background-color: #451a03; color: #fcd34d; border: 1px solid #d97706; "
+                "padding: 4px 12px; border-radius: 14px; font-weight: bold; font-size: 11px;"
+            )
+            reason = getattr(self.engine, "downgrade_reason", "驱动初始化受阻")
+            tip_msg = t("engine_tip_downgraded", reason=reason)
         else:
             self.engine_badge.setStyleSheet(
                 "background-color: #064e3b; color: #34d399; border: 1px solid #10b981; "
                 "padding: 4px 12px; border-radius: 14px; font-weight: bold; font-size: 11px;"
             )
-            self.tip_label.setText(t("engine_tip_native"))
+            tip_msg = t("engine_tip_native")
+
+        # 若处于游戏加速器/TUN 虚拟网卡环境，追加友好环境说明
+        diag = getattr(self.engine, "diagnostic", None)
+        if diag and diag.is_accelerator_environment:
+            tip_msg += f"\n{t('network_compat_accelerator_detected')}"
+
+        self.tip_label.setText(tip_msg)
+
 
     def refresh_processes(self):
         """重新扫描进程家族与活动策略 (异步执行，彻底避免窗体假死与重入)"""

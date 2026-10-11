@@ -48,8 +48,28 @@ class TestMainWindow(unittest.TestCase):
         # 2. 原生 Native 模式
         self.mock_engine.active_engine_name = "NATIVE"
         self.mock_engine.active_engine_display = "🛡️ 原生组策略引擎"
+        self.mock_engine.is_downgraded = False
+        self.mock_engine.diagnostic = None
         self.window._update_engine_status_and_tip()
         self.assertIn("Windows 原生系统策略引擎模式", self.window.tip_label.text())
+
+    def test_dynamic_engine_tip_downgraded(self):
+        """测试：驱动受阻自动降级时的黄色警告与提示文案"""
+        self.mock_engine.active_engine_name = "NATIVE"
+        self.mock_engine.is_downgraded = True
+        self.mock_engine.downgrade_reason = "杀毒软件拦截"
+        self.window._update_engine_status_and_tip()
+        self.assertIn("驱动加载受阻", self.window.tip_label.text())
+        self.assertIn("杀毒软件拦截", self.window.tip_label.text())
+
+    def test_dynamic_engine_tip_accelerator_environment(self):
+        """测试：检测到加速器/VPN虚拟网卡时的透传保护提示"""
+        from core.network_compat import NetworkDiagnostic
+        self.mock_engine.active_engine_name = "WINDIVERT"
+        self.mock_engine.is_downgraded = False
+        self.mock_engine.diagnostic = NetworkDiagnostic(is_accelerator_environment=True)
+        self.window._update_engine_status_and_tip()
+        self.assertIn("网络加速器/VPN", self.window.tip_label.text())
 
 
     def test_close_event_stops_engine_and_timers(self):

@@ -108,6 +108,8 @@ TRANSLATIONS = {
         # 引擎提示文案
         "engine_tip_windivert": "💡 提示：当前已启用 WinDivert 内核级流量整形引擎 (NetLimiter 同级技术，秒级生效且支持游戏 UDP/TCP 严格卡死 1KB/s)。“完全断开连接”同时执行内核与防火墙双重物理阻断。",
         "engine_tip_native": "💡 提示：当前处于 Windows 原生系统策略引擎模式 (基于系统组策略 QoS 出站整形与高级安全防火墙)。出站限速内核级平稳生效，入站限速由 TCP 窗口协商节流，“完全断开连接”通过防火墙双向毫秒级物理阻断。",
+        "engine_tip_downgraded": "⚠️ 提示：由于内核驱动加载受阻 ({reason})，已自动平滑降级至 Windows 原生 QoS 与防火墙引擎。限速与断网功能持续稳定生效。",
+        "network_compat_accelerator_detected": "🌐 环境提示：检测到系统正在运行网络加速器/VPN 虚拟网卡，已启用局域网与广播兼容透传保护。",
 
         # 摘要显示
         "policy_blocked": "⛔ 完全断网",
@@ -227,6 +229,8 @@ TRANSLATIONS = {
         # Engine Tips
         "engine_tip_windivert": "💡 Tip: WinDivert kernel-level traffic shaping engine active (NetLimiter-grade packet inspection, microsecond pacing, supports strict 1 KB/s throttling for both TCP and game UDP). 'Sever Connection' enforces bi-directional physical block.",
         "engine_tip_native": "💡 Tip: Windows Native QoS & Firewall mode active. Egress traffic is shaped smoothly via OS kernel QoS; ingress is throttled via TCP window scaling; 'Sever Connection' executes bi-directional hardware-level firewall block.",
+        "engine_tip_downgraded": "⚠️ Tip: Kernel driver blocked ({reason}). Smoothly downgraded to Windows Native QoS & Firewall engine. Rate limiting and blocking remain fully functional.",
+        "network_compat_accelerator_detected": "🌐 Network Notice: Accelerator/VPN virtual adapter detected. LAN and multicast compatibility bypass active.",
 
         # Summary Display
         "policy_blocked": "⛔ Blocked",

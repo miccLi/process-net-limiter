@@ -99,6 +99,10 @@ class RulesStore:
             self._rules = {}
         return self._rules
 
+    def get_all_requests(self) -> list[LimitRequest]:
+        """获取所有已持久化规则对应的 LimitRequest 请求对象"""
+        return [rule.to_limit_request() for rule in self._rules.values()]
+
     def save(self) -> bool:
         """将当前规则写入本地磁盘"""
         try:

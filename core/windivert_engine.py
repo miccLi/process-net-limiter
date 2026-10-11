@@ -11,6 +11,7 @@ import time
 import queue
 import threading
 import logging
+import re
 import psutil
 from dataclasses import dataclass
 from core.limiter_engine import PolicyStatus, LimitRequest, ASSOCIATED_PROCESSES, SYSTEM_PROTECTED_EXES
@@ -105,7 +106,39 @@ class WinDivertEngine:
         self._pacer_thread = None
         self._pacing_queue = queue.Queue(maxsize=300)
         self._driver_last_error = ""
+        self.driver_diag_code = 0
+        self.driver_diag_advice = ""
         self._pydivert_available = self._check_pydivert_available()
+
+    @staticmethod
+    def parse_driver_error(exc: Exception) -> tuple[int, str, str]:
+        """
+        深度解析 WinDivert / Windows 底层驱动 Win32 异常
+        返回: (win_error_code, error_name, user_friendly_advice)
+        """
+        winerror = getattr(exc, 'winerror', None)
+        msg = str(exc)
+
+        # 尝试从错误文本中正则匹配 [WinError 123]
+        if winerror is None:
+            m = re.search(r'\[WinError\s+(\d+)\]', msg, re.IGNORECASE)
+            if m:
+                winerror = int(m.group(1))
+
+        if winerror == 5:
+            return 5, "ERROR_ACCESS_DENIED", "权限受限或被杀毒软件 (360/火绒/Defender) 拦截驱动加载，建议添加信任"
+        elif winerror == 1275:
+            return 1275, "ERROR_DRIVER_BLOCKED", "驱动被系统安全策略或内核隔离 (HVCI) 阻止加载"
+        elif winerror == 577:
+            return 577, "ERROR_INVALID_IMAGE_HASH", "驱动数字签名无法被系统验证"
+        elif winerror in (2, 3):
+            return winerror or 2, "ERROR_FILE_NOT_FOUND", "未找到 WinDivert 驱动文件，可能已被杀软查杀隔离"
+        elif winerror == 1058:
+            return 1058, "ERROR_SERVICE_DISABLED", "WinDivert 系统服务已被禁用"
+        elif winerror == 1753:
+            return 1753, "ERROR_ENDPOINT_NOT_AVAILABLE", "网络过滤服务终端不可用"
+
+        return winerror or -1, "DRIVER_INITIALIZATION_ERROR", f"驱动初始化失败 ({msg})"
 
     @staticmethod
     def _check_pydivert_available() -> bool:
@@ -122,16 +155,23 @@ class WinDivertEngine:
     def is_driver_functional(self) -> bool:
         """真实测试当前权限下 WinDivert 内核驱动是否可以被打开使用"""
         if not self._pydivert_available:
+            self.driver_diag_code = -1
+            self.driver_diag_advice = "未安装 pydivert 驱动依赖库"
             return False
         try:
             import pydivert
             # 以匹配 false 快速测试打开与关闭，不捕获任何实际数据包
             with pydivert.WinDivert("false"):
                 pass
+            self.driver_diag_code = 0
+            self.driver_diag_advice = ""
             return True
         except Exception as e:
-            self._driver_last_error = str(e)
-            logger.debug(f"WinDivert 驱动功能探测失败: {e}")
+            code, name, advice = self.parse_driver_error(e)
+            self.driver_diag_code = code
+            self.driver_diag_advice = advice
+            self._driver_last_error = f"{name}: {advice}"
+            logger.debug(f"WinDivert 驱动功能探测失败: {e} -> {advice}")
             return False
 
     def get_active_policies(self) -> dict[str, PolicyStatus]:
@@ -409,9 +449,11 @@ class WinDivertEngine:
             self._divert_handle = divert
             ready_event.set()
         except Exception as e:
-            start_error.append(str(e))
-            self._driver_last_error = str(e)
-            logger.error(f"WinDivert 打开句柄异常: {e}")
+            code, name, advice = self.parse_driver_error(e)
+            err_msg = f"{name}: {advice}"
+            start_error.append(err_msg)
+            self._driver_last_error = err_msg
+            logger.error(f"WinDivert 打开句柄异常: {e} ({advice})")
             ready_event.set()
             return
 
@@ -421,6 +463,13 @@ class WinDivertEngine:
                     packet = divert.recv()
                     if packet is None:
                         continue
+
+                    # 局域网服务发现与多播/广播安全放行保护 (SSDP/mDNS/LLMNR)
+                    if hasattr(packet, 'dst_addr') and packet.dst_addr:
+                        dst_ip = str(packet.dst_addr)
+                        if dst_ip.startswith("224.") or dst_ip.startswith("239.") or dst_ip == "255.255.255.255":
+                            divert.send(packet)
+                            continue
 
                     # 极速哈希匹配端口 (读取原子字典，零锁争用)
                     is_outbound = packet.is_outbound
