@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-多级进程家族树组件 (ProcessTreeWidget - 轻量丝滑版)
+多级进程家族树组件 (ProcessTreeWidget - 高分屏与国际化适配版)
 类似 Windows 任务管理器的折叠树状结构：
 - 第一级：进程家族 (聚合总连接数与限速状态，支持折叠展开)
 - 第二级：家族子进程 (展示具体 PID 与执行文件路径)
-- 清爽高效的列排布：复选框 -> 程序名称 -> 限制状态 (醒目前置) -> PID -> 类别 -> 网络连接 -> 执行文件路径 (排最后)
-- 性能极致优化，无冗余轮询，响应秒级即达
+- 清爽高效的列排布：复选框 -> 程序名称 -> 限制状态 (醒目前置) -> PID -> 类别 -> 网络连接 -> 执行文件路径
+- 完美适配 Windows 高分屏缩放 (DPI-Aware) 与中英双语国际化 (i18n)
 """
 from PyQt5.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QHeaderView, QAbstractItemView, QCheckBox, QWidget, QHBoxLayout
@@ -13,22 +13,22 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from core.process_scanner import ProcessFamily, ProcessItem, ProcessCategory
+from core.i18n import t, i18n
 
-# 列定义：将最有用的信息排在前面，路径排在最右侧
+# 列定义：核心信息前置，长路径右排
 COL_CHECK = 0       # 复选框
 COL_NAME = 1        # 程序名称 / 进程家族
-COL_STATUS = 2      # 当前限制状态 (前置核心列)
+COL_STATUS = 2      # 当前限制状态
 COL_PID = 3         # PID
 COL_CATEGORY = 4    # 类别徽章
 COL_CONNS = 5       # 网络连接
-COL_PATH = 6        # 执行文件路径 (排在最后)
+COL_PATH = 6        # 执行文件路径
 
 
 class TristateHeaderCheckBox(QCheckBox):
     """
     专为多子项家族节点设计的防误触三态复选框。
-    Qt 默认 tristate 复选框在点击时会按 Unchecked -> PartiallyChecked -> Checked 循环；
-    重写 nextCheckState，保证用户手动点击时只在 Unchecked 与 Checked 之间切换，
+    用户手动点击时只在 Unchecked 与 Checked 之间切换，
     PartiallyChecked 状态仅由子进程实际勾选状态程序化联动驱动。
     """
     def nextCheckState(self):
@@ -36,6 +36,17 @@ class TristateHeaderCheckBox(QCheckBox):
             self.setCheckState(Qt.Unchecked)
         else:
             self.setCheckState(Qt.Checked)
+
+
+def format_summary_i18n(summary: str) -> str:
+    """根据当前语言环境自适应转换限速状态摘要文本"""
+    if not summary or summary == "正常":
+        return t("policy_normal")
+    if summary in ("⛔ 完全断网", "⛔ 阻断"):
+        return t("policy_blocked")
+    if i18n.current_lang == "en_US":
+        return summary.replace("上: ", "Up: ").replace("下: ", "Down: ")
+    return summary
 
 
 class ProcessTreeWidget(QTreeWidget):
@@ -50,40 +61,61 @@ class ProcessTreeWidget(QTreeWidget):
         self._init_ui()
 
     def _init_ui(self):
-        headers = [
-            "",
-            "程序名称 / 进程家族",
-            "当前限制状态",
-            "PID",
-            "类别",
-            "网络连接",
-            "执行文件路径"
-        ]
-        self.setColumnCount(len(headers))
-        self.setHeaderLabels(headers)
-
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setRootIsDecorated(True)
         self.setAnimated(True)
 
+        # 必须先设置列数和列头，QHeaderView 才能安全配置各 section
+        self.retranslate_ui()
+
         header = self.header()
         header.setSectionResizeMode(COL_CHECK, QHeaderView.Fixed)
-        self.setColumnWidth(COL_CHECK, 42)
         header.setSectionResizeMode(COL_NAME, QHeaderView.Interactive)
-        self.setColumnWidth(COL_NAME, 260)
         header.setSectionResizeMode(COL_STATUS, QHeaderView.Interactive)
-        self.setColumnWidth(COL_STATUS, 160)
         header.setSectionResizeMode(COL_PID, QHeaderView.Interactive)
-        self.setColumnWidth(COL_PID, 80)
         header.setSectionResizeMode(COL_CATEGORY, QHeaderView.Interactive)
-        self.setColumnWidth(COL_CATEGORY, 110)
         header.setSectionResizeMode(COL_CONNS, QHeaderView.Interactive)
-        self.setColumnWidth(COL_CONNS, 95)
         header.setSectionResizeMode(COL_PATH, QHeaderView.Stretch)
 
+        self._apply_column_widths()
         self.itemClicked.connect(self._on_item_clicked)
+
+
+    def _apply_column_widths(self):
+        """根据当前字体大小与 DPI 缩放计算自适应列宽"""
+        fm = self.fontMetrics()
+        scale = max(1.0, fm.height() / 16.0)
+        self.setColumnWidth(COL_CHECK, int(42 * scale))
+        self.setColumnWidth(COL_NAME, int(260 * scale))
+        self.setColumnWidth(COL_STATUS, int(160 * scale))
+        self.setColumnWidth(COL_PID, int(80 * scale))
+        self.setColumnWidth(COL_CATEGORY, int(110 * scale))
+        self.setColumnWidth(COL_CONNS, int(95 * scale))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 保持列比例合适
+        if not hasattr(self, "_initialized_widths"):
+            self._apply_column_widths()
+            self._initialized_widths = True
+
+    def retranslate_ui(self):
+        """语言切换时动态刷新表头与树内容"""
+        headers = [
+            "",
+            t("col_name"),
+            t("col_status"),
+            t("col_pid"),
+            t("col_category"),
+            t("col_conns"),
+            t("col_path")
+        ]
+        self.setColumnCount(len(headers))
+        self.setHeaderLabels(headers)
+        if self.displayed_families:
+            self._render_tree()
 
     def update_data(self, families: list[ProcessFamily]):
         """更新家族列表，保持原有的勾选状态与展开状态"""
@@ -191,39 +223,41 @@ class ProcessTreeWidget(QTreeWidget):
 
             if fam.is_protected:
                 cb.setEnabled(False)
-                cb.setToolTip("系统核心保护进程，已锁定禁止限制网络")
+                cb.setToolTip(t("protected_tooltip"))
             else:
                 cb.stateChanged.connect(lambda state, f=fam, item=fam_item: self._on_family_checkbox_changed(f, item, state))
             self.setItemWidget(fam_item, COL_CHECK, self._wrap_checkbox(cb))
 
             # 家族名称 (Column 1)
-            count_str = f" ({len(fam.children)} 个进程)" if len(fam.children) > 1 else ""
-            fam_item.setText(COL_NAME, f"{fam.category.icon} {fam.display_name}{count_str}")
+            count_str = t("processes_count", count=len(fam.children)) if len(fam.children) > 1 else ""
+            fam_item.setText(COL_NAME, f"{fam.category.icon}  {fam.display_name}{count_str}")
             fam_item.setFont(COL_NAME, bold_font)
             if fam.is_limited:
                 fam_item.setForeground(COL_NAME, QColor("#f87171"))
 
             # 限制状态 (Column 2 - 前置展示)
-            fam_item.setText(COL_STATUS, fam.limit_summary)
+            disp_summary = format_summary_i18n(fam.limit_summary)
+            fam_item.setText(COL_STATUS, disp_summary)
             if fam.is_limited:
                 fam_item.setFont(COL_STATUS, bold_font)
-                fam_item.setForeground(COL_STATUS, QColor("#fbbf24" if "KB/s" in fam.limit_summary else "#f87171"))
+                fam_item.setForeground(COL_STATUS, QColor("#fbbf24" if ("KB/s" in fam.limit_summary or "MB/s" in fam.limit_summary) else "#f87171"))
             else:
                 fam_item.setForeground(COL_STATUS, QColor("#64748b"))
 
             # PID (Column 3)
-            pid_text = f"共 {len(fam.children)}" if len(fam.children) > 1 else str(fam.children[0].pid if fam.children else "")
+            pid_text = t("total_count", count=len(fam.children)) if len(fam.children) > 1 else str(fam.children[0].pid if fam.children else "")
             fam_item.setText(COL_PID, pid_text)
             fam_item.setTextAlignment(COL_PID, Qt.AlignCenter)
             fam_item.setForeground(COL_PID, QColor("#94a3b8"))
 
-            # 类别 (Column 4)
-            fam_item.setText(COL_CATEGORY, fam.category.display_name)
+            # 类别 (Column 4 - 支持多语言国际化)
+            cat_display = t(f"cat_{fam.category.name}")
+            fam_item.setText(COL_CATEGORY, cat_display)
             fam_item.setTextAlignment(COL_CATEGORY, Qt.AlignCenter)
             fam_item.setForeground(COL_CATEGORY, QColor(fam.category.color))
 
             # 网络连接 (Column 5)
-            conn_str = f"{fam.total_connections} 个" if fam.total_connections > 0 else "—"
+            conn_str = t("conn_units", count=fam.total_connections) if fam.total_connections > 0 else "—"
             fam_item.setText(COL_CONNS, conn_str)
             fam_item.setTextAlignment(COL_CONNS, Qt.AlignCenter)
             if fam.total_connections > 0:
@@ -247,7 +281,7 @@ class ProcessTreeWidget(QTreeWidget):
                     child_cb.setChecked(child.selected)
                     if child.is_protected:
                         child_cb.setEnabled(False)
-                        child_cb.setToolTip("系统核心保护进程，已锁定禁止限制网络")
+                        child_cb.setToolTip(t("protected_tooltip"))
                     else:
                         child_cb.stateChanged.connect(lambda state, c=child, f=fam, p_item=fam_item: self._on_child_checkbox_changed(c, f, p_item, state))
                     self.setItemWidget(child_item, COL_CHECK, self._wrap_checkbox(child_cb))
@@ -256,9 +290,10 @@ class ProcessTreeWidget(QTreeWidget):
                     if child.is_limited:
                         child_item.setForeground(COL_NAME, QColor("#f87171"))
 
-                    child_item.setText(COL_STATUS, child.limit_summary)
+                    c_summary = format_summary_i18n(child.limit_summary)
+                    child_item.setText(COL_STATUS, c_summary)
                     if child.is_limited:
-                        child_item.setForeground(COL_STATUS, QColor("#fbbf24" if "KB/s" in child.limit_summary else "#f87171"))
+                        child_item.setForeground(COL_STATUS, QColor("#fbbf24" if ("KB/s" in child.limit_summary or "MB/s" in child.limit_summary) else "#f87171"))
                     else:
                         child_item.setForeground(COL_STATUS, QColor("#64748b"))
 
@@ -266,11 +301,12 @@ class ProcessTreeWidget(QTreeWidget):
                     child_item.setTextAlignment(COL_PID, Qt.AlignCenter)
                     child_item.setForeground(COL_PID, QColor("#cbd5e1"))
 
-                    child_item.setText(COL_CATEGORY, child.category.display_name)
+                    child_cat = t(f"cat_{child.category.name}")
+                    child_item.setText(COL_CATEGORY, child_cat)
                     child_item.setTextAlignment(COL_CATEGORY, Qt.AlignCenter)
                     child_item.setForeground(COL_CATEGORY, QColor(child.category.color))
 
-                    child_conn = f"{child.connections_count} 个" if child.connections_count > 0 else "—"
+                    child_conn = t("conn_units", count=child.connections_count) if child.connections_count > 0 else "—"
                     child_item.setText(COL_CONNS, child_conn)
                     child_item.setTextAlignment(COL_CONNS, Qt.AlignCenter)
                     child_item.setForeground(COL_CONNS, QColor("#38bdf8" if child.connections_count > 0 else "#64748b"))

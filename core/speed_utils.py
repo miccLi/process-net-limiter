@@ -38,10 +38,12 @@ def speed_str_to_bps(speed_type: str, custom_val: float = 0, unit: str = "KB/s")
     return 0
 
 
-def format_speed_display(bps: int) -> str:
+def format_speed_display(bps: int, lang: str = None) -> str:
     """将 bps 转换为直观的人类可读速度字符串 (B/s, KB/s, MB/s, GB/s)"""
+    from core.i18n import i18n
+    current = lang or i18n.current_lang
     if bps <= 0:
-        return "不限"
+        return "Unlimited" if current == "en_US" else "不限"
     bytes_sec = bps / 8.0
     if bytes_sec >= 1024 * 1024 * 1024:
         val = bytes_sec / (1024 * 1024 * 1024)
@@ -56,13 +58,23 @@ def format_speed_display(bps: int) -> str:
         return f"{int(bytes_sec)} B/s"
 
 
-def format_policy_summary(is_blocked: bool, up_bps: int = 0, dl_bps: int = 0, block_tag: str = "⛔ 完全断网") -> str:
-    """生成统一的限速策略摘要描述文本"""
+def format_policy_summary(is_blocked: bool, up_bps: int = 0, dl_bps: int = 0, block_tag: str = None, lang: str = None) -> str:
+    """生成统一的限速策略摘要描述文本 (支持中英双语)"""
+    from core.i18n import i18n
+    current = lang or i18n.current_lang
+    default_block = "⛔ Blocked" if current == "en_US" else "⛔ 完全断网"
+    tag = block_tag if block_tag is not None else default_block
     if is_blocked:
-        return block_tag
+        return tag
+
     parts = []
+    up_prefix = "Up: " if current == "en_US" else "上: "
+    dl_prefix = "Down: " if current == "en_US" else "下: "
+    normal_str = "Normal" if current == "en_US" else "正常"
+
     if up_bps > 0:
-        parts.append(f"上: {format_speed_display(up_bps)}")
+        parts.append(f"{up_prefix}{format_speed_display(up_bps, current)}")
     if dl_bps > 0:
-        parts.append(f"下: {format_speed_display(dl_bps)}")
-    return " | ".join(parts) if parts else "正常"
+        parts.append(f"{dl_prefix}{format_speed_display(dl_bps, current)}")
+    return " | ".join(parts) if parts else normal_str
+

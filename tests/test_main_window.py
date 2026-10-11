@@ -25,6 +25,12 @@ class TestMainWindow(unittest.TestCase):
 
         self.window = MainWindow()
 
+    def tearDown(self):
+        if hasattr(self, "window") and self.window:
+            event = QCloseEvent()
+            self.window.closeEvent(event)
+
+
     def test_filter_chips_contain_limited(self):
         """测试：主界面分类筛选芯片中包含'LIMITED'和'BROWSER_SOCIAL'"""
         buttons = self.window.filter_group.buttons()

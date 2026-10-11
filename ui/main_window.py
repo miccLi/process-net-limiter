@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-主窗口逻辑 (异步高性能架构)
+主窗口逻辑 (现代化高分屏适配与国际化架构)
 - 多级进程家族树状列表 (折叠展开与多级勾选)
-- 异步工作线程 (QThread)，彻底消除策略下发与扫描时的界面假死/卡顿
-- 优化列排布 (核心信息在前，执行路径在后)
-- 合并下发与单次回读 QoS 与防火墙策略
-- UAC 状态与自动提权
+- 异步工作线程 (QThread)，彻底消除策略下发与扫描时的界面卡顿
+- 全面适配各种屏幕分辨率与 Windows 缩放设置 (Per-Monitor High-DPI)
+- 完整的中英文双语切换与配置持久化 (i18n)
+- 现代暗色质感界面 (Fluent Dark & Glassmorphism Aesthetics)
 """
 import os
 import sys
@@ -21,6 +21,7 @@ from core.uac_manager import is_admin, restart_as_admin
 from core.engine_manager import EngineManager
 from core.limiter_engine import LimitRequest
 from core.process_scanner import scan_and_group_processes, ProcessFamily
+from core.i18n import t, i18n
 from ui.process_tree import ProcessTreeWidget
 from ui.styles import DARK_THEME_QSS
 
@@ -51,10 +52,11 @@ class AsyncWorker(QThread):
             else:
                 ok, msg, payload = True, str(res), None
             # 将耗时信息附加在回调中
-            msg_with_time = f"{msg} (耗时 {duration:.2f}s)"
+            time_suffix = f" ({duration:.2f}s)"
+            msg_with_time = f"{msg}{time_suffix}"
             self.finishedSignal.emit(ok, msg_with_time, payload)
         except Exception as e:
-            self.finishedSignal.emit(False, f"执行异常: {e}", None)
+            self.finishedSignal.emit(False, f"Error: {e}", None)
 
 
 class MainWindow(QMainWindow):
@@ -63,8 +65,12 @@ class MainWindow(QMainWindow):
         self.engine = EngineManager()
         self.current_filter_category = "ALL"
         self._active_worker = None
+        self._scan_worker = None
+        self._last_families = []
+
         self._init_window()
         self._init_ui()
+        self.retranslate_ui()
         self.refresh_processes()
 
         # 自动刷新定时器 (可选开启，默认每 5 秒低频刷新)
@@ -72,52 +78,65 @@ class MainWindow(QMainWindow):
         self.scan_timer.timeout.connect(self._on_auto_refresh)
 
     def _init_window(self):
-        self.setWindowTitle("进程网络限制器 (ProcessNetLimiter) - 专业版")
-        self.resize(1180, 760)
-        self.setMinimumSize(920, 600)
+        # 屏幕分辨率自适应：根据用户当前活动桌面可用区域智能计算最佳初始窗口大小
+        screen = QApplication.primaryScreen()
+        if screen:
+            geom = screen.availableGeometry()
+            target_w = min(1220, max(940, int(geom.width() * 0.82)))
+            target_h = min(820, max(620, int(geom.height() * 0.82)))
+            self.resize(target_w, target_h)
+            self.setMinimumSize(min(860, geom.width()), min(560, geom.height()))
+        else:
+            self.resize(1180, 760)
+            self.setMinimumSize(920, 600)
+
         self.setStyleSheet(DARK_THEME_QSS)
 
     def _init_ui(self):
         central_widget = QWidget()
+        central_widget.setObjectName("CentralWidget")
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(16, 14, 16, 14)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(18, 16, 18, 16)
+        main_layout.setSpacing(12)
 
-        # 1. 顶部状态栏与权限提示条
+        # 1. 顶部状态栏与权限/引擎控制卡片
         top_bar = QHBoxLayout()
         top_bar.setSpacing(10)
 
-        title_label = QLabel("进程网络限制器")
-        title_label.setObjectName("AppTitle")
-        top_bar.addWidget(title_label)
+        self.title_label = QLabel("进程网络限制器")
+        self.title_label.setObjectName("AppTitle")
+        top_bar.addWidget(self.title_label)
 
-        sub_title = QLabel("支持多进程家族折叠、精确上下行分离限速与断网")
-        sub_title.setObjectName("SubTitle")
-        top_bar.addWidget(sub_title)
+        self.sub_title = QLabel("支持多进程家族折叠、精确上下行分离限速与断网")
+        self.sub_title.setObjectName("SubTitle")
+        top_bar.addWidget(self.sub_title)
 
         top_bar.addStretch()
 
-        # 引擎架构状态指示
+        # 语言切换选择器 (Bilingual Switcher)
+        self.lang_combo = QComboBox()
+        self.lang_combo.setObjectName("LangSelector")
+        self.lang_combo.addItem("🇨🇳 中文", "zh_CN")
+        self.lang_combo.addItem("🇬🇧 English", "en_US")
+        curr_idx = 0 if i18n.current_lang == "zh_CN" else 1
+        self.lang_combo.setCurrentIndex(curr_idx)
+        self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
+        top_bar.addWidget(self.lang_combo)
+
+        # 引擎架构状态指示徽章
         self.engine_badge = QLabel(self.engine.active_engine_display)
         self.engine_badge.setObjectName("EngineBadge")
-        self.engine_badge.setStyleSheet(
-            "background-color: #1a252f; color: #3498db; border: 1px solid #2980b9; "
-            "padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 11px;"
-        )
         top_bar.addWidget(self.engine_badge)
 
-        # 管理员权限指示
+        # 管理员权限指示按钮
         self.admin_btn = QPushButton()
-        self.admin_btn.setObjectName("AdminBadge")
         if is_admin():
-            self.admin_btn.setText("🛡️ 已获管理员权限")
+            self.admin_btn.setObjectName("AdminBadgeOk")
             self.admin_btn.setEnabled(False)
-            self.admin_btn.setStyleSheet("background-color: #27ae60; color: white; border: none; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
         else:
-            self.admin_btn.setText("⚠️ 未获取管理员权限 (点击提权)")
+            self.admin_btn.setObjectName("AdminBadgeWarn")
             self.admin_btn.clicked.connect(self._on_request_admin)
-            self.admin_btn.setStyleSheet("background-color: #e67e22; color: white; border: none; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
         top_bar.addWidget(self.admin_btn)
 
         # 刷新与自动扫描控制
@@ -137,30 +156,33 @@ class MainWindow(QMainWindow):
         filter_bar.setSpacing(8)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍 搜索程序名称、PID、可执行文件路径...")
+        self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self._on_search_changed)
-        filter_bar.addWidget(self.search_input, 2)
+        filter_bar.addWidget(self.search_input, 3)
 
-        # 分类筛选按钮组
+        # 分类筛选按钮组 (芯片风格)
         self.filter_group = QButtonGroup(self)
         self.filter_group.setExclusive(True)
 
-        categories = [
-            ("全部程序", "ALL"),
-            ("⛔ 仅看已限制", "LIMITED"),
-            ("🚀 下载器优先", "DOWNLOADER"),
-            ("☁️ 网盘优先", "CLOUD_DRIVE"),
-            ("🎮 游戏优先", "GAME"),
-            ("🌐 浏览器与社交", "BROWSER_SOCIAL"),
+        self.filter_categories = [
+            ("filter_all", "ALL"),
+            ("filter_limited", "LIMITED"),
+            ("filter_downloader", "DOWNLOADER"),
+            ("filter_cloud_drive", "CLOUD_DRIVE"),
+            ("filter_game", "GAME"),
+            ("filter_browser_social", "BROWSER_SOCIAL"),
         ]
 
-        for i, (label, tag) in enumerate(categories):
-            btn = QPushButton(label)
+        self.filter_buttons = []
+        for i, (key, tag) in enumerate(self.filter_categories):
+            btn = QPushButton(t(key))
+            btn.setObjectName("FilterChip")
             btn.setCheckable(True)
             if i == 0:
                 btn.setChecked(True)
-            btn.clicked.connect(lambda checked, t=tag: self._on_filter_chip_clicked(t))
+            btn.clicked.connect(lambda checked, t_tag=tag: self._on_filter_chip_clicked(t_tag))
             self.filter_group.addButton(btn, i)
+            self.filter_buttons.append((btn, key))
             filter_bar.addWidget(btn)
 
         filter_bar.addStretch()
@@ -185,11 +207,11 @@ class MainWindow(QMainWindow):
         self.tree.selectionChangedCustom.connect(self._on_selection_changed)
         main_layout.addWidget(self.tree, 1)
 
-        # 4. 底部限速操作控制面板
+        # 4. 底部限速操作控制面板卡片
         control_card = QFrame()
         control_card.setObjectName("ControlCard")
         ctrl_layout = QVBoxLayout(control_card)
-        ctrl_layout.setContentsMargins(16, 12, 16, 12)
+        ctrl_layout.setContentsMargins(18, 14, 18, 14)
         ctrl_layout.setSpacing(10)
 
         # 控制栏上部：已选择摘要与分离设置开关
@@ -198,7 +220,7 @@ class MainWindow(QMainWindow):
         self.selected_summary_label.setObjectName("SectionTitle")
         top_ctrl_row.addWidget(self.selected_summary_label)
 
-        top_ctrl_row.addSpacing(20)
+        top_ctrl_row.addSpacing(24)
 
         self.separate_cb = QCheckBox("⚙️ 分别设置上传和下载速度 (独立配置)")
         self.separate_cb.setChecked(False)
@@ -217,20 +239,11 @@ class MainWindow(QMainWindow):
         up_layout = QHBoxLayout(self.up_group_widget)
         up_layout.setContentsMargins(0, 0, 0, 0)
         up_layout.setSpacing(6)
-        
+
         self.up_title = QLabel("速度限制:")
         up_layout.addWidget(self.up_title)
 
         self.up_combo = QComboBox()
-        self.up_combo.addItems([
-            "完全断开连接 (0 KB/s - 阻断连接)",
-            "1 KB/s (极限限速)",
-            "100 KB/s (低速限制)",
-            "1000 KB/s (中速限制 / ~1MB/s)",
-            "自定义速度限制...",
-            "不进行限制"
-        ])
-        self.up_combo.setCurrentIndex(2)  # 默认 100 KB/s
         self.up_combo.currentIndexChanged.connect(self._on_up_combo_changed)
         up_layout.addWidget(self.up_combo)
 
@@ -253,19 +266,10 @@ class MainWindow(QMainWindow):
         dl_layout.setContentsMargins(0, 0, 0, 0)
         dl_layout.setSpacing(6)
 
-        dl_title = QLabel("下载限制:")
-        dl_layout.addWidget(dl_title)
+        self.dl_title = QLabel("下载限制:")
+        dl_layout.addWidget(self.dl_title)
 
         self.dl_combo = QComboBox()
-        self.dl_combo.addItems([
-            "完全断开连接 (0 KB/s - 阻断连接)",
-            "1 KB/s (极限限速)",
-            "100 KB/s (低速限制)",
-            "1000 KB/s (中速限制 / ~1MB/s)",
-            "自定义速度限制...",
-            "不限制下载"
-        ])
-        self.dl_combo.setCurrentIndex(2)
         self.dl_combo.currentIndexChanged.connect(self._on_dl_combo_changed)
         dl_layout.addWidget(self.dl_combo)
 
@@ -302,32 +306,121 @@ class MainWindow(QMainWindow):
 
         ctrl_layout.addLayout(settings_row)
 
-        # 原理与机制温馨提示 (动态跟随当前激活引擎展示)
+        # 原理与机制温馨提示卡片
+        tip_frame = QFrame()
+        tip_frame.setObjectName("TipBanner")
+        tip_layout = QHBoxLayout(tip_frame)
+        tip_layout.setContentsMargins(10, 6, 10, 6)
+        
         self.tip_label = QLabel()
-        self.tip_label.setStyleSheet("color: #718096; font-size: 11px; padding-top: 2px;")
         self.tip_label.setWordWrap(True)
-        self._update_engine_status_and_tip()
-        ctrl_layout.addWidget(self.tip_label)
+        tip_layout.addWidget(self.tip_label)
+        ctrl_layout.addWidget(tip_frame)
 
         main_layout.addWidget(control_card)
 
         # 5. 底部状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪。提示：支持直接勾选进程家族批量限速，或展开家族仅限制某一特定进程。")
+
+    def retranslate_ui(self):
+        """全面更新界面上所有的文本信息 (支持中英文无缝切换)"""
+        self.setWindowTitle(t("app_window_title"))
+        self.title_label.setText(t("app_title"))
+        self.sub_title.setText(t("app_subtitle"))
+        self.refresh_btn.setText(t("refresh_btn"))
+        self.auto_refresh_cb.setText(t("auto_refresh"))
+        self.search_input.setPlaceholderText(t("search_placeholder"))
+
+        # 更新筛选芯片文本
+        for btn, key in self.filter_buttons:
+            btn.setText(t(key))
+
+        # 快捷选择
+        self.select_all_btn.setText(t("select_all"))
+        self.invert_btn.setText(t("invert_sel"))
+        self.clear_sel_btn.setText(t("clear_sel"))
+
+        # 树视图更新表头与节点
+        self.tree.retranslate_ui()
+
+        # 管理员按钮
+        if is_admin():
+            self.admin_btn.setText(t("admin_granted"))
+        else:
+            self.admin_btn.setText(t("admin_needed"))
+
+        # 控制面板
+        self.separate_cb.setText(t("separate_checkbox"))
+        if self.separate_cb.isChecked():
+            self.up_title.setText(t("upload_limit_label"))
+        else:
+            self.up_title.setText(t("speed_limit_label"))
+        self.dl_title.setText(t("download_limit_label"))
+
+        # 刷新速度下拉框预设选项
+        cur_up = self.up_combo.currentIndex() if self.up_combo.count() > 0 else 2
+        self.up_combo.blockSignals(True)
+        self.up_combo.clear()
+        self.up_combo.addItems([
+            t("preset_block"),
+            t("preset_1kb"),
+            t("preset_100kb"),
+            t("preset_1000kb"),
+            t("preset_custom"),
+            t("preset_none_up")
+        ])
+        self.up_combo.setCurrentIndex(max(0, cur_up))
+        self.up_combo.blockSignals(False)
+
+        cur_dl = self.dl_combo.currentIndex() if self.dl_combo.count() > 0 else 2
+        self.dl_combo.blockSignals(True)
+        self.dl_combo.clear()
+        self.dl_combo.addItems([
+            t("preset_block"),
+            t("preset_1kb"),
+            t("preset_100kb"),
+            t("preset_1000kb"),
+            t("preset_custom"),
+            t("preset_none_dl")
+        ])
+        self.dl_combo.setCurrentIndex(max(0, cur_dl))
+        self.dl_combo.blockSignals(False)
+
+        self.apply_btn.setText(t("btn_apply"))
+        self.remove_selected_btn.setText(t("btn_remove_selected"))
+        self.reset_all_btn.setText(t("btn_reset_all"))
+
+        # 刷新已选择摘要
+        selected_count = len(self.tree.get_selected_targets())
+        self.selected_summary_label.setText(t("selected_summary", count=selected_count))
+
+        # 引擎提示更新
+        self._update_engine_status_and_tip()
+
+        # 状态栏
+        if not self._last_families:
+            self.status_bar.showMessage(t("ready_tip"))
+        else:
+            self._update_status_bar_metrics()
+
+    def _on_language_changed(self, index):
+        lang_code = self.lang_combo.currentData()
+        i18n.set_language(lang_code)
+        self.retranslate_ui()
 
     def _set_busy(self, busy: bool, action_desc: str = ""):
-        """设置界面异步繁忙状态，禁用操作按钮防止重复提交，同时保持主窗口 60FPS 极速响应"""
+        """设置界面异步繁忙状态，禁用操作按钮防止重复提交，保持主窗口 60FPS 极速响应"""
         self.apply_btn.setEnabled(not busy)
         self.remove_selected_btn.setEnabled(not busy)
         self.reset_all_btn.setEnabled(not busy)
         self.refresh_btn.setEnabled(not busy)
 
         if busy:
-            self.apply_btn.setText(f"⏳ {action_desc}...")
-            self.status_bar.showMessage(f"⏳ 正在{action_desc}，后台处理中，界面保持流畅响应...")
+            self.apply_btn.setText(t("btn_apply_busy", action=action_desc))
+            self.status_bar.showMessage(t("busy_applying", action=action_desc))
         else:
-            self.apply_btn.setText("🚀 应用限速")
+            self.apply_btn.setText(t("btn_apply"))
 
     def _update_engine_status_and_tip(self):
         """根据当前激活引擎动态更新顶部徽章与底部说明文案"""
@@ -336,34 +429,28 @@ class MainWindow(QMainWindow):
         self.engine_badge.setText(self.engine.active_engine_display)
         if self.engine.active_engine_name == "WINDIVERT":
             self.engine_badge.setStyleSheet(
-                "background-color: #1a252f; color: #3498db; border: 1px solid #2980b9; "
-                "padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 11px;"
+                "background-color: #0c4a6e; color: #38bdf8; border: 1px solid #0284c7; "
+                "padding: 4px 12px; border-radius: 14px; font-weight: bold; font-size: 11px;"
             )
-            self.tip_label.setText(
-                "💡 提示：当前已启用 WinDivert 内核级流量整形引擎 (NetLimiter 同级技术，秒级生效且支持游戏 UDP/TCP 严格卡死 1KB/s)。"
-                "“完全断开连接”同时执行内核与防火墙双重物理阻断。"
-            )
+            self.tip_label.setText(t("engine_tip_windivert"))
         else:
             self.engine_badge.setStyleSheet(
-                "background-color: #142a1f; color: #2ecc71; border: 1px solid #27ae60; "
-                "padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 11px;"
+                "background-color: #064e3b; color: #34d399; border: 1px solid #10b981; "
+                "padding: 4px 12px; border-radius: 14px; font-weight: bold; font-size: 11px;"
             )
-            self.tip_label.setText(
-                "💡 提示：当前处于 Windows 原生系统策略引擎模式 (基于系统组策略 QoS 出站整形与高级安全防火墙)。"
-                "出站限速内核级平稳生效，入站限速由 TCP 窗口协商节流，“完全断开连接”通过防火墙双向毫秒级物理阻断。"
-            )
+            self.tip_label.setText(t("engine_tip_native"))
 
     def refresh_processes(self):
         """重新扫描进程家族与活动策略 (异步执行，彻底避免窗体假死与重入)"""
         if hasattr(self, "_scan_worker") and self._scan_worker and self._scan_worker.isRunning():
             return
         self.refresh_btn.setEnabled(False)
-        self.status_bar.showMessage("正在获取活动策略并扫描进程家族...")
+        self.status_bar.showMessage(t("scanning_status"))
 
         def _do_scan():
             policies = self.engine.get_active_policies()
             families = scan_and_group_processes(policies)
-            return True, "刷新完成", families
+            return True, "Scan completed", families
 
         self._scan_worker = AsyncWorker(_do_scan)
         self._scan_worker.finishedSignal.connect(self._on_refresh_completed)
@@ -373,15 +460,20 @@ class MainWindow(QMainWindow):
         self.refresh_btn.setEnabled(True)
         self._update_engine_status_and_tip()
         if ok and families is not None:
+            self._last_families = families
             self.tree.update_data(families)
-            total_procs = sum(len(f.children) for f in families)
-            limited_count = sum(1 for f in families if f.is_limited)
-            active_conn_count = sum(1 for f in families if f.total_connections > 0)
-            self.status_bar.showMessage(
-                f"已就绪 | 进程家族: {len(families)} | 总进程数: {total_procs} | 联网家族: {active_conn_count} | 已限制: {limited_count}"
-            )
+            self._update_status_bar_metrics()
         else:
-            self.status_bar.showMessage("刷新失败")
+            self.status_bar.showMessage(t("scan_failed"))
+
+    def _update_status_bar_metrics(self):
+        families = self._last_families
+        total_procs = sum(len(f.children) for f in families)
+        limited_count = sum(1 for f in families if f.is_limited)
+        active_conn_count = sum(1 for f in families if f.total_connections > 0)
+        self.status_bar.showMessage(
+            t("scan_done_status", fams=len(families), procs=total_procs, conns=active_conn_count, limited=limited_count)
+        )
 
     def _on_async_policy_op_finished(self, ok: bool, msg: str, policies: dict):
         """策略操作异步完成回调：直接利用回读的 policies 刷新视图，省去二次查询"""
@@ -389,14 +481,15 @@ class MainWindow(QMainWindow):
         self._update_engine_status_and_tip()
         if policies is not None:
             families = scan_and_group_processes(policies)
+            self._last_families = families
             self.tree.update_data(families)
             limited_count = sum(1 for f in families if f.is_limited)
-            self.status_bar.showMessage(f"✅ {msg} | 当前受限进程家族数: {limited_count}")
+            self.status_bar.showMessage(t("op_finished", msg=msg, count=limited_count))
         else:
             self.refresh_processes()
 
         if not ok:
-            QMessageBox.warning(self, "操作异常", msg)
+            QMessageBox.warning(self, t("op_error"), msg)
 
     def _on_auto_refresh(self):
         self.refresh_processes()
@@ -404,10 +497,10 @@ class MainWindow(QMainWindow):
     def _on_auto_refresh_toggle(self, state):
         if state == Qt.Checked:
             self.scan_timer.start(5000)
-            self.status_bar.showMessage("已开启自动刷新 (每 5 秒)")
+            self.status_bar.showMessage(t("auto_refresh_on"))
         else:
             self.scan_timer.stop()
-            self.status_bar.showMessage("已关闭自动刷新")
+            self.status_bar.showMessage(t("auto_refresh_off"))
 
     def _on_search_changed(self, text):
         self.tree.apply_filter(text, self.current_filter_category)
@@ -417,15 +510,15 @@ class MainWindow(QMainWindow):
         self.tree.apply_filter(self.search_input.text(), self.current_filter_category)
 
     def _on_selection_changed(self, count):
-        self.selected_summary_label.setText(f"已选择 {count} 个程序/家族")
+        self.selected_summary_label.setText(t("selected_summary", count=count))
 
     def _on_separate_toggle(self, state):
         is_separate = (state == Qt.Checked)
         self.dl_group_widget.setVisible(is_separate)
         if is_separate:
-            self.up_title.setText("上传限制:")
+            self.up_title.setText(t("upload_limit_label"))
         else:
-            self.up_title.setText("速度限制 (上传与下载):")
+            self.up_title.setText(t("speed_limit_label"))
 
     def _on_up_combo_changed(self, index):
         is_custom = (index == 4)
@@ -441,7 +534,7 @@ class MainWindow(QMainWindow):
         if restart_as_admin():
             sys.exit(0)
         else:
-            QMessageBox.warning(self, "提权提示", "未能获取管理员权限。请右键选择“以管理员身份运行”。")
+            QMessageBox.warning(self, t("elevation_title"), t("elevation_failed"))
 
     def _parse_speed_choice(self, combo_idx: int) -> str:
         mapping = {
@@ -461,7 +554,7 @@ class MainWindow(QMainWindow):
 
         targets = self.tree.get_selected_targets()
         if not targets:
-            QMessageBox.information(self, "提示", "请先在列表中勾选想要限制的程序或家族！")
+            QMessageBox.information(self, t("notice"), t("no_selection_warning"))
             return
 
         is_separate = self.separate_cb.isChecked()
@@ -487,7 +580,7 @@ class MainWindow(QMainWindow):
             for app_name, exe_path in targets
         ]
 
-        self._set_busy(True, "下发策略")
+        self._set_busy(True, t("action_apply"))
         self._active_worker = AsyncWorker(self.engine.apply_limits_batch, requests)
         self._active_worker.finishedSignal.connect(self._on_async_policy_op_finished)
         self._active_worker.start()
@@ -499,11 +592,11 @@ class MainWindow(QMainWindow):
 
         targets = self.tree.get_selected_targets()
         if not targets:
-            QMessageBox.information(self, "提示", "请先在列表中勾选想要解除限制的程序或家族！")
+            QMessageBox.information(self, t("notice"), t("no_selection_remove_warning"))
             return
 
         app_names = [name for name, _ in targets]
-        self._set_busy(True, "解除限制")
+        self._set_busy(True, t("action_remove"))
         self._active_worker = AsyncWorker(self.engine.remove_limits_batch, app_names)
         self._active_worker.finishedSignal.connect(self._on_async_policy_op_finished)
         self._active_worker.start()
@@ -515,13 +608,13 @@ class MainWindow(QMainWindow):
 
         reply = QMessageBox.question(
             self,
-            "确认重置",
-            "确定要一键清除系统中所有由本程序设置的 QoS 速度限制与防火墙阻断规则吗？\n此操作将确保所有网络程序恢复原始无限制状态。",
+            t("reset_confirm_title"),
+            t("reset_confirm_text"),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            self._set_busy(True, "一键清除策略")
+            self._set_busy(True, t("action_reset"))
             self._active_worker = AsyncWorker(self.engine.remove_all_limits)
             self._active_worker.finishedSignal.connect(self._on_async_policy_op_finished)
             self._active_worker.start()
