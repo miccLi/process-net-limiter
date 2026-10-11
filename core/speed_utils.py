@@ -78,3 +78,23 @@ def format_policy_summary(is_blocked: bool, up_bps: int = 0, dl_bps: int = 0, bl
         parts.append(f"{dl_prefix}{format_speed_display(dl_bps, current)}")
     return " | ".join(parts) if parts else normal_str
 
+
+def format_byte_rate(bytes_sec: float) -> str:
+    """
+    将每秒字节数转换为直观的人类可读吞吐速率字符串 (如 '0 B/s', '850 B/s', '124.5 KB/s', '3.8 MB/s', '1.25 GB/s')
+    """
+    if bytes_sec <= 0:
+        return "0 B/s"
+    if bytes_sec < 1024:
+        return f"{int(bytes_sec)} B/s"
+    elif bytes_sec < 1024 * 1024:
+        kb = bytes_sec / 1024.0
+        return f"{kb:.1f} KB/s" if kb < 100 else f"{int(kb)} KB/s"
+    elif bytes_sec < 1024 * 1024 * 1024:
+        mb = bytes_sec / (1024.0 * 1024.0)
+        return f"{mb:.1f} MB/s" if mb < 100 else f"{int(mb)} MB/s"
+    else:
+        gb = bytes_sec / (1024.0 * 1024.0 * 1024.0)
+        return f"{gb:.2f} GB/s"
+
+

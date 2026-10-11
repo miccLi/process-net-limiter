@@ -97,6 +97,19 @@ QLabel#EngineBadge {
     padding: 4px 12px;
 }
 
+/* 全局实时吞吐监控徽章 */
+QLabel#TrafficBadge {
+    background-color: #0f172a;
+    border: 1px solid #0284c7;
+    border-radius: 14px;
+    font-weight: 700;
+    font-size: 12px;
+    padding: 4px 14px;
+    color: #38bdf8;
+    letter-spacing: 0.5px;
+}
+
+
 /* 语言切换器选择框 */
 QComboBox#LangSelector {
     background-color: #1a2332;

@@ -19,10 +19,12 @@ from core.i18n import t, i18n
 COL_CHECK = 0       # 复选框
 COL_NAME = 1        # 程序名称 / 进程家族
 COL_STATUS = 2      # 当前限制状态
-COL_PID = 3         # PID
-COL_CATEGORY = 4    # 类别徽章
-COL_CONNS = 5       # 网络连接
-COL_PATH = 6        # 执行文件路径
+COL_UP_SPEED = 3    # ↑ 上传速率
+COL_DOWN_SPEED = 4  # ↓ 下载速率
+COL_PID = 5         # PID
+COL_CATEGORY = 6    # 类别徽章
+COL_CONNS = 7       # 网络连接
+COL_PATH = 8        # 执行文件路径
 
 
 class TristateHeaderCheckBox(QCheckBox):
@@ -74,6 +76,8 @@ class ProcessTreeWidget(QTreeWidget):
         header.setSectionResizeMode(COL_CHECK, QHeaderView.Fixed)
         header.setSectionResizeMode(COL_NAME, QHeaderView.Interactive)
         header.setSectionResizeMode(COL_STATUS, QHeaderView.Interactive)
+        header.setSectionResizeMode(COL_UP_SPEED, QHeaderView.Interactive)
+        header.setSectionResizeMode(COL_DOWN_SPEED, QHeaderView.Interactive)
         header.setSectionResizeMode(COL_PID, QHeaderView.Interactive)
         header.setSectionResizeMode(COL_CATEGORY, QHeaderView.Interactive)
         header.setSectionResizeMode(COL_CONNS, QHeaderView.Interactive)
@@ -88,11 +92,13 @@ class ProcessTreeWidget(QTreeWidget):
         fm = self.fontMetrics()
         scale = max(1.0, fm.height() / 16.0)
         self.setColumnWidth(COL_CHECK, int(42 * scale))
-        self.setColumnWidth(COL_NAME, int(260 * scale))
-        self.setColumnWidth(COL_STATUS, int(160 * scale))
-        self.setColumnWidth(COL_PID, int(80 * scale))
-        self.setColumnWidth(COL_CATEGORY, int(110 * scale))
-        self.setColumnWidth(COL_CONNS, int(95 * scale))
+        self.setColumnWidth(COL_NAME, int(240 * scale))
+        self.setColumnWidth(COL_STATUS, int(150 * scale))
+        self.setColumnWidth(COL_UP_SPEED, int(95 * scale))
+        self.setColumnWidth(COL_DOWN_SPEED, int(95 * scale))
+        self.setColumnWidth(COL_PID, int(75 * scale))
+        self.setColumnWidth(COL_CATEGORY, int(100 * scale))
+        self.setColumnWidth(COL_CONNS, int(85 * scale))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -107,6 +113,8 @@ class ProcessTreeWidget(QTreeWidget):
             "",
             t("col_name"),
             t("col_status"),
+            t("col_up_speed"),
+            t("col_down_speed"),
             t("col_pid"),
             t("col_category"),
             t("col_conns"),
@@ -196,6 +204,7 @@ class ProcessTreeWidget(QTreeWidget):
         for fam in self.displayed_families:
             fam_item = QTreeWidgetItem(self)
             fam_item.setData(0, Qt.UserRole, fam.family_id)
+            fam_item.setData(1, Qt.UserRole, [c.name.lower() for c in fam.children])
 
             # 计算家族初始勾选状态 (三态联动)
             non_prot = [c for c in fam.children if not c.is_protected]
@@ -244,7 +253,16 @@ class ProcessTreeWidget(QTreeWidget):
             else:
                 fam_item.setForeground(COL_STATUS, QColor("#64748b"))
 
-            # PID (Column 3)
+            # 初始上传/下载速率列 (Column 3 & 4)
+            fam_item.setText(COL_UP_SPEED, "—")
+            fam_item.setTextAlignment(COL_UP_SPEED, Qt.AlignCenter)
+            fam_item.setForeground(COL_UP_SPEED, QColor("#64748b"))
+
+            fam_item.setText(COL_DOWN_SPEED, "—")
+            fam_item.setTextAlignment(COL_DOWN_SPEED, Qt.AlignCenter)
+            fam_item.setForeground(COL_DOWN_SPEED, QColor("#64748b"))
+
+            # PID (Column 5)
             pid_text = t("total_count", count=len(fam.children)) if len(fam.children) > 1 else str(fam.children[0].pid if fam.children else "")
             fam_item.setText(COL_PID, pid_text)
             fam_item.setTextAlignment(COL_PID, Qt.AlignCenter)
@@ -276,6 +294,7 @@ class ProcessTreeWidget(QTreeWidget):
                 for child in fam.children:
                     child_item = QTreeWidgetItem(fam_item)
                     child_item.setData(0, Qt.UserRole, child.pid)
+                    child_item.setData(1, Qt.UserRole, child.name.lower())
 
                     child_cb = QCheckBox()
                     child_cb.setChecked(child.selected)
@@ -296,6 +315,15 @@ class ProcessTreeWidget(QTreeWidget):
                         child_item.setForeground(COL_STATUS, QColor("#fbbf24" if ("KB/s" in child.limit_summary or "MB/s" in child.limit_summary) else "#f87171"))
                     else:
                         child_item.setForeground(COL_STATUS, QColor("#64748b"))
+
+                    # 子项初始上传/下载速率 (Column 3 & 4)
+                    child_item.setText(COL_UP_SPEED, "—")
+                    child_item.setTextAlignment(COL_UP_SPEED, Qt.AlignCenter)
+                    child_item.setForeground(COL_UP_SPEED, QColor("#64748b"))
+
+                    child_item.setText(COL_DOWN_SPEED, "—")
+                    child_item.setTextAlignment(COL_DOWN_SPEED, Qt.AlignCenter)
+                    child_item.setForeground(COL_DOWN_SPEED, QColor("#64748b"))
 
                     child_item.setText(COL_PID, str(child.pid))
                     child_item.setTextAlignment(COL_PID, Qt.AlignCenter)
@@ -419,3 +447,53 @@ class ProcessTreeWidget(QTreeWidget):
     def _emit_selected_count(self):
         targets = self.get_selected_targets()
         self.selectionChangedCustom.emit(len(targets))
+
+    def update_speeds(self, app_rates: dict[str, tuple[float, float]]):
+        """
+        轻量级无感刷新实时网速，仅修改文本和前景色，零重绘闪烁，零焦点改变。
+        :param app_rates: key 为 app_name.lower()，value 为 (up_bytes_sec, down_bytes_sec)
+        """
+        if not app_rates:
+            return
+
+        from core.speed_utils import format_byte_rate
+
+        for i in range(self.topLevelItemCount()):
+            fam_item = self.topLevelItem(i)
+            child_names = fam_item.data(1, Qt.UserRole) or []
+
+            fam_up = 0.0
+            fam_dl = 0.0
+
+            child_count = fam_item.childCount()
+            if child_count > 0:
+                for j in range(child_count):
+                    c_item = fam_item.child(j)
+                    c_name = c_item.data(1, Qt.UserRole) or ""
+                    c_up, c_dl = app_rates.get(c_name, (0.0, 0.0))
+                    fam_up += c_up
+                    fam_dl += c_dl
+                    self._set_speed_item_text(c_item, c_up, c_dl, format_byte_rate)
+            else:
+                for c_name in child_names:
+                    u, d = app_rates.get(c_name, (0.0, 0.0))
+                    fam_up += u
+                    fam_dl += d
+
+            self._set_speed_item_text(fam_item, fam_up, fam_dl, format_byte_rate)
+
+    def _set_speed_item_text(self, item: QTreeWidgetItem, up_rate: float, dl_rate: float, format_func):
+        """辅助设置单个树节点的上传和下载速率与色彩"""
+        if up_rate > 10.0:
+            item.setText(COL_UP_SPEED, f"↑ {format_func(up_rate)}")
+            item.setForeground(COL_UP_SPEED, QColor("#38bdf8"))
+        else:
+            item.setText(COL_UP_SPEED, "—")
+            item.setForeground(COL_UP_SPEED, QColor("#64748b"))
+
+        if dl_rate > 10.0:
+            item.setText(COL_DOWN_SPEED, f"↓ {format_func(dl_rate)}")
+            item.setForeground(COL_DOWN_SPEED, QColor("#34d399"))
+        else:
+            item.setText(COL_DOWN_SPEED, "—")
+            item.setForeground(COL_DOWN_SPEED, QColor("#64748b"))

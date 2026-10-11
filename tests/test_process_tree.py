@@ -247,7 +247,59 @@ class TestProcessTreeWidget(unittest.TestCase):
         self.assertEqual(len(self.tree.displayed_families), 1)
         self.assertEqual(self.tree.displayed_families[0].family_id, "throttled")
 
+    def test_update_speeds_single_and_multi_process(self):
+        """测试：update_speeds 极速刷新单进程与多进程家族网速列"""
+        from ui.process_tree import COL_UP_SPEED, COL_DOWN_SPEED
+
+        # 构造包含单进程与多子进程的家族
+        child1 = ProcessItem(
+            pid=7001, name="child1.exe", exe_path="C:\\App\\child1.exe",
+            category=ProcessCategory.DOWNLOADER, connections_count=1,
+            is_limited=False, limit_summary="正常", sort_priority=1, is_protected=False
+        )
+        child2 = ProcessItem(
+            pid=7002, name="child2.exe", exe_path="C:\\App\\child2.exe",
+            category=ProcessCategory.DOWNLOADER, connections_count=2,
+            is_limited=False, limit_summary="正常", sort_priority=1, is_protected=False
+        )
+        multi_fam = ProcessFamily(
+            family_id="multi_family", display_name="Multi Family",
+            category=ProcessCategory.DOWNLOADER, children=[child1, child2], is_protected=False
+        )
+
+        self.tree.update_data([self.normal_fam, multi_fam])
+        # 展开多子进程家族
+        fam_item_multi = self.tree.topLevelItem(1)
+        fam_item_multi.setExpanded(True)
+
+        # 模拟各进程速率映射 (bytes/sec)
+        speeds = {
+            "normal_app.exe": (102400.0, 204800.0),   # 100 KB/s up, 200 KB/s down
+            "child1.exe": (51200.0, 0.0),             # 50 KB/s up, 0 down
+            "child2.exe": (10240.0, 1048576.0),       # 10 KB/s up, 1.0 MB/s down
+        }
+
+        self.tree.update_speeds(speeds)
+
+        # 1. 验证单进程节点
+        fam_item_normal = self.tree.topLevelItem(0)
+        self.assertIn("100 KB/s", fam_item_normal.text(COL_UP_SPEED))
+        self.assertIn("200 KB/s", fam_item_normal.text(COL_DOWN_SPEED))
+
+        # 2. 验证多进程子节点
+        child_item1 = fam_item_multi.child(0)
+        child_item2 = fam_item_multi.child(1)
+        self.assertIn("50.0 KB/s", child_item1.text(COL_UP_SPEED))
+        self.assertEqual(child_item1.text(COL_DOWN_SPEED), "—")
+        self.assertIn("10.0 KB/s", child_item2.text(COL_UP_SPEED))
+        self.assertIn("1.0 MB/s", child_item2.text(COL_DOWN_SPEED))
+
+        # 3. 验证多进程父节点聚合 (合计: up = 60 KB/s, down = 1.0 MB/s)
+        self.assertIn("60.0 KB/s", fam_item_multi.text(COL_UP_SPEED))
+        self.assertIn("1.0 MB/s", fam_item_multi.text(COL_DOWN_SPEED))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -21,6 +21,7 @@ class EngineManager:
         self.native_engine = LimiterEngine()
         self.windivert_engine = WinDivertEngine()
         self.rules_store = rules_store if rules_store is not None else RulesStore()
+        self.traffic_monitor = self.windivert_engine.traffic_monitor
 
         # 严格校验：以管理员运行 且 驱动能够正常打开时才启用 WinDivert 内核引擎
         self.use_windivert = is_admin() and self.windivert_engine.is_driver_functional()
@@ -141,4 +142,16 @@ class EngineManager:
                 self.windivert_engine.stop()
         except Exception as e:
             logger.warning(f"停止 WinDivert 引擎时发生异常: {e}")
+
+    def tick_traffic_monitor(self) -> tuple[float, float]:
+        """推进流量监控器时间步并返回系统全局吞吐 (global_up_bytes_sec, global_down_bytes_sec)"""
+        return self.traffic_monitor.tick()
+
+    def get_global_rates(self) -> tuple[float, float]:
+        """获取当前系统全局上传与下载实时速率 (bytes/sec)"""
+        return self.traffic_monitor.get_global_rates()
+
+    def get_process_rates(self) -> dict[str, tuple[float, float]]:
+        """获取各应用程序的实时上传与下载速率映射 (bytes/sec)"""
+        return self.traffic_monitor.get_all_app_rates()
 

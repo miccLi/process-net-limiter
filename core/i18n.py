@@ -38,10 +38,14 @@ TRANSLATIONS = {
         # 进程树列头
         "col_name": "程序名称 / 进程家族",
         "col_status": "当前限制状态",
+        "col_up_speed": "↑ 上传",
+        "col_down_speed": "↓ 下载",
         "col_pid": "PID",
         "col_category": "类别",
         "col_conns": "网络连接",
         "col_path": "执行文件路径",
+        "global_traffic_label": "实时总吞吐: ↑ {up}  ↓ {down}",
+        "tray_tooltip_traffic": "进程网络限制器\n↑ {up} | ↓ {down}",
 
         # 分类名称
         "cat_DOWNLOADER": "下载器",
@@ -153,10 +157,14 @@ TRANSLATIONS = {
         # Tree Headers
         "col_name": "Application / Process Family",
         "col_status": "Limit Status",
+        "col_up_speed": "↑ Upload",
+        "col_down_speed": "↓ Download",
         "col_pid": "PID",
         "col_category": "Category",
         "col_conns": "Connections",
         "col_path": "Executable Path",
+        "global_traffic_label": "Total Throughput: ↑ {up}  ↓ {down}",
+        "tray_tooltip_traffic": "ProcessNetLimiter\n↑ {up} | ↓ {down}",
 
         # Categories
         "cat_DOWNLOADER": "Downloader",

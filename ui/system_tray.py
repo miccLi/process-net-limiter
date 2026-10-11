@@ -195,3 +195,11 @@ class SystemTrayManager(QSystemTrayIcon):
         """向 Windows 发射原生系统托盘气泡提示"""
         icon = QSystemTrayIcon.Warning if is_warn else QSystemTrayIcon.Information
         self.showMessage(title, message, icon, duration_ms)
+
+    def update_tooltip_rates(self, up_str: str, down_str: str, limited_count: int = 0):
+        """动态更新托盘悬停提示（包含实时系统吞吐与当前受限进程数）"""
+        tip = f"{t('app_title')}\n↑ {up_str} | ↓ {down_str}"
+        if limited_count > 0:
+            tip += f"\n{t('filter_limited')}: {limited_count}"
+        self.setToolTip(tip)
+

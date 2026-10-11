@@ -90,6 +90,11 @@ class MainWindow(QMainWindow):
         self.scan_timer = QTimer(self)
         self.scan_timer.timeout.connect(self._on_auto_refresh)
 
+        # 实时网络测速定时器 (1 秒周期驱动计算与微刷新)
+        self.speed_timer = QTimer(self)
+        self.speed_timer.timeout.connect(self._on_speed_tick)
+        self.speed_timer.start(1000)
+
 
     def _init_window(self):
         # 屏幕分辨率自适应：根据用户当前活动桌面可用区域智能计算最佳初始窗口大小
@@ -142,6 +147,11 @@ class MainWindow(QMainWindow):
         self.engine_badge = QLabel(self.engine.active_engine_display)
         self.engine_badge.setObjectName("EngineBadge")
         top_bar.addWidget(self.engine_badge)
+
+        # 全局实时网络吞吐看板徽章
+        self.traffic_badge = QLabel("↑ 0 B/s   ↓ 0 B/s")
+        self.traffic_badge.setObjectName("TrafficBadge")
+        top_bar.addWidget(self.traffic_badge)
 
         # 管理员权限指示按钮
         self.admin_btn = QPushButton()
@@ -345,6 +355,8 @@ class MainWindow(QMainWindow):
         self.refresh_btn.setText(t("refresh_btn"))
         self.auto_refresh_cb.setText(t("auto_refresh"))
         self.search_input.setPlaceholderText(t("search_placeholder"))
+        if hasattr(self, "traffic_badge"):
+            self.traffic_badge.setToolTip(t("global_traffic_label", up="Upload", down="Download"))
 
         # 更新筛选芯片文本
         for btn, key in self.filter_buttons:
@@ -533,6 +545,31 @@ class MainWindow(QMainWindow):
     def _on_search_changed(self, text):
         self.tree.apply_filter(text, self.current_filter_category)
 
+    def _on_speed_tick(self):
+        """每秒驱动一次实时网络吞吐与进程速率计算与界面刷新"""
+        try:
+            global_up, global_down = self.engine.tick_traffic_monitor()
+            from core.speed_utils import format_byte_rate
+            up_str = format_byte_rate(global_up)
+            down_str = format_byte_rate(global_down)
+
+            # 1. 刷新顶部全局看板
+            if hasattr(self, "traffic_badge") and self.traffic_badge:
+                self.traffic_badge.setText(f"↑ {up_str}   ↓ {down_str}")
+
+            # 2. 刷新进程家族树的各应用速率列
+            app_rates = self.engine.get_process_rates()
+            if hasattr(self, "tree") and self.tree:
+                self.tree.update_speeds(app_rates)
+
+            # 3. 动态刷新托盘悬浮提示
+            if hasattr(self, "tray") and self.tray:
+                limited_cnt = sum(1 for f in self.tree.displayed_families if f.is_limited)
+                self.tray.update_tooltip_rates(up_str, down_str, limited_cnt)
+        except Exception:
+            pass
+
+
     def _on_filter_chip_clicked(self, category_tag):
         self.current_filter_category = category_tag
         self.tree.apply_filter(self.search_input.text(), self.current_filter_category)
@@ -666,6 +703,9 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "scan_timer") and self.scan_timer.isActive():
             self.scan_timer.stop()
+
+        if hasattr(self, "speed_timer") and self.speed_timer.isActive():
+            self.speed_timer.stop()
 
         if hasattr(self, "_scan_worker") and self._scan_worker and self._scan_worker.isRunning():
             try:

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import unittest
-from core.speed_utils import speed_str_to_bps, format_speed_display, format_policy_summary
+from core.speed_utils import speed_str_to_bps, format_speed_display, format_policy_summary, format_byte_rate
 
 
 class TestSpeedUtils(unittest.TestCase):
@@ -36,6 +36,17 @@ class TestSpeedUtils(unittest.TestCase):
         self.assertEqual(format_speed_display(int(2.5 * 1024 * 1024 * 8)), "2.5 MB/s")
         self.assertEqual(format_speed_display(8 * 1024 * 1024 * 1024), "1 GB/s")
 
+    def test_format_byte_rate(self):
+        """测试实时吞吐速率格式化"""
+        self.assertEqual(format_byte_rate(0), "0 B/s")
+        self.assertEqual(format_byte_rate(-10), "0 B/s")
+        self.assertEqual(format_byte_rate(512), "512 B/s")
+        self.assertEqual(format_byte_rate(1024), "1.0 KB/s")
+        self.assertEqual(format_byte_rate(1536), "1.5 KB/s")
+        self.assertEqual(format_byte_rate(150 * 1024), "150 KB/s")
+        self.assertEqual(format_byte_rate(2.5 * 1024 * 1024), "2.5 MB/s")
+        self.assertEqual(format_byte_rate(1.25 * 1024 * 1024 * 1024), "1.25 GB/s")
+
     def test_format_policy_summary(self):
         """测试策略描述文本拼接"""
         self.assertEqual(format_policy_summary(True), "⛔ 完全断网")
@@ -48,3 +59,4 @@ class TestSpeedUtils(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

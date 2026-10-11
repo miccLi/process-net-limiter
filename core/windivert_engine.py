@@ -15,6 +15,7 @@ import psutil
 from dataclasses import dataclass
 from core.limiter_engine import PolicyStatus, LimitRequest, ASSOCIATED_PROCESSES, SYSTEM_PROTECTED_EXES
 from core.speed_utils import speed_str_to_bps as util_speed_str_to_bps, format_policy_summary
+from core.traffic_monitor import TrafficMonitor
 
 logger = logging.getLogger("WinDivertEngine")
 
@@ -93,6 +94,8 @@ class WinDivertEngine:
     def __init__(self):
         self.rules: dict[str, ProcessRule] = {}  # key: lower app name, e.g. "steam.exe"
         self.port_to_rules: dict[int, ProcessRule] = {}  # key: local port (原子替换，免锁读取)
+        self.port_to_app: dict[int, str] = {}  # key: local port -> app_name (全部活跃网络进程映射)
+        self.traffic_monitor = TrafficMonitor()
         self._lock = threading.RLock()
         self._running = False
         self._stop_event = threading.Event()
@@ -314,30 +317,34 @@ class WinDivertEngine:
             with self._lock:
                 target_names = set(self.rules.keys())
 
-            if not target_names:
-                self.port_to_rules = {}
-                return
+            new_port_map: dict[int, ProcessRule] = {}
+            new_port_to_app: dict[int, str] = {}
+            pids_to_name: dict[int, str] = {}
+            pids_to_rules: dict[int, ProcessRule] = {}
 
-            pids_to_rules = {}
             for p in psutil.process_iter(['pid', 'name']):
                 try:
                     pname = (p.info['name'] or '').lower()
-                    if pname in target_names:
-                        with self._lock:
-                            rule = self.rules.get(pname)
-                        if rule:
-                            pids_to_rules[p.info['pid']] = rule
+                    if pname:
+                        pids_to_name[p.info['pid']] = pname
+                        if pname in target_names:
+                            with self._lock:
+                                rule = self.rules.get(pname)
+                            if rule:
+                                pids_to_rules[p.info['pid']] = rule
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
 
-            new_port_map: dict[int, ProcessRule] = {}
             for c in psutil.net_connections(kind='all'):
-                if c.pid and c.pid in pids_to_rules:
-                    if c.laddr and hasattr(c.laddr, 'port') and c.laddr.port > 0:
+                if c.pid and c.laddr and hasattr(c.laddr, 'port') and c.laddr.port > 0:
+                    if c.pid in pids_to_rules:
                         new_port_map[c.laddr.port] = pids_to_rules[c.pid]
+                    if c.pid in pids_to_name:
+                        new_port_to_app[c.laddr.port] = pids_to_name[c.pid]
 
             # 原子指针替换，工作收包线程读取时绝对免锁！
             self.port_to_rules = new_port_map
+            self.port_to_app = new_port_to_app
         except Exception as e:
             logger.debug(f"更新端口映射异常: {e}")
 
@@ -419,6 +426,12 @@ class WinDivertEngine:
                     is_outbound = packet.is_outbound
                     port_to_check = packet.src_port if is_outbound else packet.dst_port
                     rule = self.port_to_rules.get(port_to_check)
+                    app_name = rule.app_name if rule else self.port_to_app.get(port_to_check)
+                    pkt_len = len(packet.raw) if hasattr(packet, 'raw') and packet.raw else 1500
+
+                    # 记录实时流量统计
+                    if app_name:
+                        self.traffic_monitor.record_packet(app_name, is_outbound, pkt_len)
 
                     # 若非受限进程数据包：立即 0 延迟重注入放行！
                     if not rule:
