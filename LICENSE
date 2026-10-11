@@ -19,3 +19,30 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+## Third-Party Components & License Notices
+
+This project makes use of the following third-party software components and libraries:
+
+1. **WinDivert (Windows Packet Divert)**
+   - Copyright (c) 2011-2022 basil
+   - License: GNU Lesser General Public License version 3 (LGPLv3) / GNU General Public License version 2 (GPLv2)
+   - Website: https://reqrypt.org/windivert.html
+   - Notice: The official EV-digitally-signed binary driver (`WinDivert64.sys`) and user-mode dynamic link library (`WinDivert.dll` / `WinDivert64.dll`) are utilized unmodified as an external system service and dynamically loaded module.
+
+2. **pydivert**
+   - Copyright (c) 2014-2022 FFRI, Inc.
+   - License: GNU Lesser General Public License version 3 (LGPLv3)
+   - Repository: https://github.com/ffalcinelli/pydivert
+
+3. **PyQt5**
+   - Copyright (c) 2021 Riverbank Computing Limited
+   - License: GNU General Public License version 3 (GPLv3) / Commercial
+   - Website: https://www.riverbankcomputing.com/software/pyqt/
+
+4. **psutil**
+   - Copyright (c) 2009-2024 Jay Loden, Dave Daeschler, Giampaolo Rodola
+   - License: BSD 3-Clause License
+   - Repository: https://github.com/giampaolo/psutil
