@@ -27,9 +27,9 @@ class TestMainWindow(unittest.TestCase):
 
     def tearDown(self):
         if hasattr(self, "window") and self.window:
+            self.window._force_quit = True
             event = QCloseEvent()
             self.window.closeEvent(event)
-
 
     def test_filter_chips_contain_limited(self):
         """测试：主界面分类筛选芯片中包含'LIMITED'和'BROWSER_SOCIAL'"""
@@ -51,16 +51,31 @@ class TestMainWindow(unittest.TestCase):
         self.window._update_engine_status_and_tip()
         self.assertIn("Windows 原生系统策略引擎模式", self.window.tip_label.text())
 
+
     def test_close_event_stops_engine_and_timers(self):
-        """测试：窗口关闭时正确停止定时器并回收引擎资源"""
+        """测试：显式退出窗口时正确停止定时器并回收引擎资源"""
         self.window.scan_timer.start(5000)
         self.assertTrue(self.window.scan_timer.isActive())
 
+        self.window._force_quit = True
         event = QCloseEvent()
         self.window.closeEvent(event)
 
         self.assertFalse(self.window.scan_timer.isActive())
         self.mock_engine.stop.assert_called_once()
+
+    def test_close_event_minimizes_to_tray_by_default(self):
+        """测试：默认点击关闭按钮时最小化隐藏到系统托盘，不释放引擎资源"""
+        self.window.show()
+        self.window._force_quit = False
+        event = QCloseEvent()
+        self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        self.assertFalse(self.window.isVisible())
+        self.mock_engine.stop.assert_not_called()
+
+
 
 
 if __name__ == "__main__":

@@ -111,7 +111,20 @@ TRANSLATIONS = {
         "policy_up_prefix": "上: ",
         "policy_down_prefix": "下: ",
         "speed_unlimited": "不限",
-        "lang_switch_label": "🌐 语言 / Language"
+        "lang_switch_label": "🌐 语言 / Language",
+
+        # 托盘与开机自启
+        "tray_show": "显示主界面",
+        "tray_hide": "最小化到托盘",
+        "tray_emergency_restore": "⚡ 紧急恢复网络",
+        "tray_autostart": "开机静默启动",
+        "tray_exit": "退出程序",
+        "tray_minimized_title": "ProcessNetLimiter 已转入后台",
+        "tray_minimized_msg": "程序已最小化至系统托盘，限速与断网策略持续在后台生效。",
+        "tray_restore_title": "网络已紧急恢复",
+        "tray_restore_done": "已清除所有限速与阻断策略，所有程序网络恢复正常。",
+        "autostart_enabled_msg": "已开启开机静默启动 (通过系统计划任务)",
+        "autostart_disabled_msg": "已关闭开机静默启动"
     },
     "en_US": {
         # App & Header
@@ -213,7 +226,20 @@ TRANSLATIONS = {
         "policy_up_prefix": "Up: ",
         "policy_down_prefix": "Down: ",
         "speed_unlimited": "Unlimited",
-        "lang_switch_label": "🌐 Language"
+        "lang_switch_label": "🌐 Language",
+
+        # Tray and Autostart
+        "tray_show": "Show Window",
+        "tray_hide": "Minimize to Tray",
+        "tray_emergency_restore": "⚡ Emergency Restore All",
+        "tray_autostart": "Start with Windows",
+        "tray_exit": "Exit",
+        "tray_minimized_title": "ProcessNetLimiter Active in Background",
+        "tray_minimized_msg": "Application minimized to system tray. Rate limiting and blocking rules remain active.",
+        "tray_restore_title": "Network Restored",
+        "tray_restore_done": "All rate limits and blocks have been cleared. Normal traffic restored.",
+        "autostart_enabled_msg": "Auto-start on logon enabled (via Task Scheduler)",
+        "autostart_disabled_msg": "Auto-start on logon disabled"
     }
 }
 

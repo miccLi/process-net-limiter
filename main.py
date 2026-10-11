@@ -49,11 +49,15 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("ProcessNetLimiter")
+    # 允许在主窗口隐藏到托盘时保持进程常驻后台
+    app.setQuitOnLastWindowClosed(False)
 
     window = MainWindow()
-    window.show()
+    if "--minimized" not in sys.argv:
+        window.show()
 
     sys.exit(app.exec_())
+
 
 
 if __name__ == "__main__":

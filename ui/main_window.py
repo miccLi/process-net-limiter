@@ -23,7 +23,9 @@ from core.limiter_engine import LimitRequest
 from core.process_scanner import scan_and_group_processes, ProcessFamily
 from core.i18n import t, i18n
 from ui.process_tree import ProcessTreeWidget
+from ui.system_tray import SystemTrayManager
 from ui.styles import DARK_THEME_QSS
+
 
 
 class AsyncWorker(QThread):
@@ -67,15 +69,25 @@ class MainWindow(QMainWindow):
         self._active_worker = None
         self._scan_worker = None
         self._last_families = []
+        self._force_quit = False
+        self._first_minimize_notified = False
 
         self._init_window()
         self._init_ui()
+
+        # 系统托盘初始化 (支持后台常驻、一键紧急恢复、气泡通知)
+        self.tray = SystemTrayManager(self)
+        self.tray.restoreAllRequested.connect(self._on_emergency_restore_all)
+        self.tray.exitRequested.connect(self._on_tray_exit)
+        self.tray.show()
+
         self.retranslate_ui()
         self.refresh_processes()
 
         # 自动刷新定时器 (可选开启，默认每 5 秒低频刷新)
         self.scan_timer = QTimer(self)
         self.scan_timer.timeout.connect(self._on_auto_refresh)
+
 
     def _init_window(self):
         # 屏幕分辨率自适应：根据用户当前活动桌面可用区域智能计算最佳初始窗口大小
@@ -404,6 +416,11 @@ class MainWindow(QMainWindow):
         else:
             self._update_status_bar_metrics()
 
+        # 托盘菜单文字同步更新
+        if hasattr(self, "tray") and self.tray:
+            self.tray.retranslate_ui()
+
+
     def _on_language_changed(self, index):
         lang_code = self.lang_combo.currentData()
         i18n.set_language(lang_code)
@@ -620,7 +637,22 @@ class MainWindow(QMainWindow):
             self._active_worker.start()
 
     def closeEvent(self, event):
-        """窗口关闭安全退出生命周期处理：终止定时器、回收异步 Worker、释放驱动资源"""
+        """窗口关闭安全退出生命周期处理：优先最小化至系统托盘常驻，显式退出时彻底回收资源"""
+        if not self._force_quit:
+            # 最小化隐藏到系统托盘，保持后台限速持续生效
+            event.ignore()
+            self.hide()
+            if hasattr(self, "tray") and self.tray:
+                self.tray.update_visibility_action()
+                if not self._first_minimize_notified:
+                    self.tray.notify(t("tray_minimized_title"), t("tray_minimized_msg"))
+                    self._first_minimize_notified = True
+            return
+
+        # 真正退出程序生命周期清理
+        if hasattr(self, "tray") and self.tray:
+            self.tray.hide()
+
         if hasattr(self, "scan_timer") and self.scan_timer.isActive():
             self.scan_timer.stop()
 
@@ -647,3 +679,28 @@ class MainWindow(QMainWindow):
             pass
 
         event.accept()
+
+    def _on_tray_exit(self):
+        """从托盘菜单显式退出"""
+        self._force_quit = True
+        self.close()
+
+    def _on_emergency_restore_all(self):
+        """从托盘菜单触发一键紧急恢复网络"""
+        if hasattr(self, "_active_worker") and self._active_worker and self._active_worker.isRunning():
+            return
+
+        def _do_restore():
+            policies = self.engine.remove_all_limits()
+            return True, "Emergency restore complete", policies
+
+        self._set_busy(True, t("action_reset"))
+        self._active_worker = AsyncWorker(_do_restore)
+        self._active_worker.finishedSignal.connect(self._on_emergency_restore_finished)
+        self._active_worker.start()
+
+    def _on_emergency_restore_finished(self, ok: bool, msg: str, policies: dict):
+        self._on_async_policy_op_finished(ok, msg, policies)
+        if hasattr(self, "tray") and self.tray:
+            self.tray.notify(t("tray_restore_title"), t("tray_restore_done"))
+
