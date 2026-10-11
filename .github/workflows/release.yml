@@ -42,12 +42,29 @@ jobs:
         run: |
           Compress-Archive -Path dist\ProcessNetLimiter -DestinationPath dist\ProcessNetLimiter-Portable-x64.zip -Force
 
-      - name: Set up Inno Setup Compiler
-        uses: bcomnes/action-innosetup@v3
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $innoDir = (Get-Item "C:\Program Files*\Inno Setup *").FullName | Select-Object -First 1
+          if (-not $innoDir) {
+            $innoDir = "C:\Program Files (x86)\Inno Setup 6"
+          }
+          Write-Host "Inno Setup installed at: $innoDir"
+          echo "$innoDir" >> $env:GITHUB_PATH
 
       - name: Compile Inno Setup Installer
+        shell: pwsh
         run: |
-          iscc installer/setup.iss
+          $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          if (-not $iscc) {
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          Write-Host "Compiling with ISCC: $iscc"
+          & "$iscc" /Q installer\setup.iss
 
       - name: Verify build artifacts
         shell: pwsh
