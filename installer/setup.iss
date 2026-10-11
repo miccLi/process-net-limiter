@@ -32,7 +32,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 
 ; 输出目录与文件名
 OutputDir=..\dist
-OutputBaseFilename=ProcessNetLimiter_Setup_v{#MyAppVersion}_x64
+OutputBaseFilename=ProcessNetLimiter-Setup-x64
 Compression=lzma2/ultra64
 SolidCompression=yes
 
@@ -43,7 +43,7 @@ DisableDirPage=no
 DisableProgramGroupPage=yes
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]

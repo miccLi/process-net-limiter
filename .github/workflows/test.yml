@@ -3,6 +3,7 @@ name: Automated Test Suite
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -11,6 +12,10 @@ jobs:
   test:
     name: Unit Tests (Python ${{ matrix.python-version }})
     runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: "utf-8"
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: "offscreen"
     strategy:
       matrix:
         python-version: ["3.10", "3.11"]

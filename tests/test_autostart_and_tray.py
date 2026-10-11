@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
+import os
 import sys
 import unittest
 from unittest.mock import patch, MagicMock
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QIcon, QPixmap
 

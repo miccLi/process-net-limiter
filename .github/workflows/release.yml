@@ -13,6 +13,10 @@ jobs:
   build:
     name: Build & Package (Windows x64)
     runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: "utf-8"
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: "offscreen"
 
     steps:
       - name: Checkout repository
@@ -36,23 +40,28 @@ jobs:
       - name: Archive Portable Distribution (ZIP)
         shell: pwsh
         run: |
-          Compress-Archive -Path dist\ProcessNetLimiter\* -DestinationPath dist\ProcessNetLimiter-Portable-x64.zip -Force
+          Compress-Archive -Path dist\ProcessNetLimiter -DestinationPath dist\ProcessNetLimiter-Portable-x64.zip -Force
 
-      - name: Install Inno Setup
-        run: |
-          choco install innosetup --no-progress -y
+      - name: Set up Inno Setup Compiler
+        uses: bcomnes/action-innosetup@v3
 
       - name: Compile Inno Setup Installer
-        shell: cmd
         run: |
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\setup.iss
+          iscc installer/setup.iss
+
+      - name: Verify build artifacts
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path dist
+          if (-not (Test-Path "dist\ProcessNetLimiter-Portable-x64.zip")) { throw "Portable ZIP not found!" }
+          if (-not (Test-Path "dist\ProcessNetLimiter-Setup-x64.exe")) { throw "Setup EXE not found!" }
 
       - name: Publish Release to GitHub
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/ProcessNetLimiter-Portable-x64.zip
-            installer/Output/ProcessNetLimiter-Setup-x64.exe
+            dist/ProcessNetLimiter-Setup-x64.exe
           draft: false
           prerelease: false
           generate_release_notes: true

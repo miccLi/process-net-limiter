@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
+import os
 import sys
 import unittest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtWidgets import QApplication
 
 from ui.process_tree import ProcessTreeWidget
