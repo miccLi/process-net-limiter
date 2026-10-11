@@ -20,7 +20,7 @@ from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from core.uac_manager import is_admin, restart_as_admin
 from core.engine_manager import EngineManager
 from core.limiter_engine import LimitRequest
-from core.process_scanner import scan_and_group_processes, ProcessFamily
+from core.process_scanner import scan_and_group_processes, ProcessFamily, get_running_app_paths
 from core.i18n import t, i18n
 from ui.process_tree import ProcessTreeWidget
 from ui.system_tray import SystemTrayManager
@@ -71,9 +71,11 @@ class MainWindow(QMainWindow):
         self._last_families = []
         self._force_quit = False
         self._first_minimize_notified = False
+        self._rebound_performed = False
 
         self._init_window()
         self._init_ui()
+
 
         # 系统托盘初始化 (支持后台常驻、一键紧急恢复、气泡通知)
         self.tray = SystemTrayManager(self)
@@ -465,9 +467,18 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(t("scanning_status"))
 
         def _do_scan():
+            if not self._rebound_performed:
+                try:
+                    running_apps = get_running_app_paths()
+                    self.engine.auto_rebind_persistent_rules(running_apps)
+                except Exception:
+                    pass
+                self._rebound_performed = True
+
             policies = self.engine.get_active_policies()
             families = scan_and_group_processes(policies)
             return True, "Scan completed", families
+
 
         self._scan_worker = AsyncWorker(_do_scan)
         self._scan_worker.finishedSignal.connect(self._on_refresh_completed)

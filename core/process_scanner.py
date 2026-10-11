@@ -255,3 +255,20 @@ def scan_and_group_processes(active_policies: dict[str, PolicyStatus]) -> list[P
     ))
 
     return family_list
+
+
+def get_running_app_paths() -> dict[str, str]:
+    """获取系统中当前运行的唯一进程名到可执行文件绝对路径的映射 (小写键)"""
+    running_apps = {}
+    for proc in psutil.process_iter(["name", "exe"]):
+        try:
+            name = proc.info.get("name")
+            exe = proc.info.get("exe")
+            if name and exe:
+                k = name.lower()
+                if k not in running_apps:
+                    running_apps[k] = exe
+        except Exception:
+            pass
+    return running_apps
+
