@@ -39,10 +39,10 @@ class TestAutostartAndTray(unittest.TestCase):
         mock_run.return_value = MagicMock(returncode=0, stdout="SUCCESS", stderr="")
         ok, msg = set_autostart(True)
         self.assertTrue(ok)
-        args = mock_run.call_args[0][0]
-        self.assertIn("/create", args)
-        self.assertIn("highest", args)
-        self.assertIn("onlogon", args)
+        first_args = mock_run.call_args_list[0][0][0]
+        self.assertIn("/create", first_args)
+        self.assertIn("highest", first_args)
+        self.assertIn("onlogon", first_args)
 
     @patch("subprocess.run")
     def test_set_autostart_disable_success(self, mock_run):

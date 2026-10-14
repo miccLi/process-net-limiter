@@ -73,6 +73,20 @@ def set_autostart(enable: bool) -> tuple[bool, str]:
                 timeout=10
             )
             if res.returncode == 0:
+                # 增强配置：允许电池供电自启、使用电池时不中断、取消 72 小时运行时间限制
+                try:
+                    ps_opt = (
+                        f"$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0; "
+                        f"Set-ScheduledTask -TaskName '{TASK_NAME}' -Settings $s -ErrorAction SilentlyContinue | Out-Null"
+                    )
+                    subprocess.run(
+                        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_opt],
+                        capture_output=True,
+                        creationflags=CREATE_NO_WINDOW,
+                        timeout=5
+                    )
+                except Exception:
+                    pass
                 return True, "Success"
             else:
                 err = (res.stderr or res.stdout or "").strip()

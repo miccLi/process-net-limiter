@@ -69,7 +69,7 @@ class RulesStore:
         self.load()
 
     def load(self) -> Dict[str, StoredRule]:
-        """从本地磁盘加载持久化规则"""
+        """从本地磁盘加载持久化规则，损坏时自动备份隔离"""
         if not os.path.exists(self.filepath):
             self._rules = {}
             return self._rules
@@ -95,7 +95,14 @@ class RulesStore:
                     rules_dict[rule.app_name.lower()] = rule
             self._rules = rules_dict
         except Exception as e:
-            logger.warning(f"读取规则文件失败，重置为空: {e}")
+            logger.warning(f"读取规则文件失败，自动隔离备份并重置: {e}")
+            try:
+                corrupt_backup = f"{self.filepath}.corrupt.{int(time.time())}.bak"
+                if os.path.exists(self.filepath):
+                    os.replace(self.filepath, corrupt_backup)
+                    logger.info(f"已将损坏的规则文件安全备份为: {corrupt_backup}")
+            except Exception as be:
+                logger.error(f"备份损坏规则文件异常: {be}")
             self._rules = {}
         return self._rules
 
@@ -104,18 +111,26 @@ class RulesStore:
         return [rule.to_limit_request() for rule in self._rules.values()]
 
     def save(self) -> bool:
-        """将当前规则写入本地磁盘"""
+        """将当前规则原子性写入本地磁盘 (tmp 文件 + os.replace)"""
         try:
-            os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
+            dir_name = os.path.dirname(self.filepath)
+            os.makedirs(dir_name, exist_ok=True)
+            temp_file = f"{self.filepath}.tmp"
             data = {
                 "version": 1,
                 "rules": [asdict(r) for r in self._rules.values()]
             }
-            with open(self.filepath, "w", encoding="utf-8") as f:
+            with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(temp_file, self.filepath)
             return True
         except Exception as e:
-            logger.error(f"写入规则文件失败: {e}")
+            logger.error(f"原子写入规则文件失败: {e}")
             return False
 
     def save_request(self, req: LimitRequest) -> None:

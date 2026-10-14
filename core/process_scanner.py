@@ -131,6 +131,9 @@ def scan_and_group_processes(active_policies: dict[str, PolicyStatus]) -> list[P
     """
     轻量、极速扫描当前系统中所有运行的进程并分组为任务管理器式进程家族树。
     """
+    if not isinstance(active_policies, dict):
+        active_policies = {}
+
     connections_by_pid: dict[int, int] = {}
     try:
         for c in psutil.net_connections(kind="inet"):
@@ -163,7 +166,13 @@ def scan_and_group_processes(active_policies: dict[str, PolicyStatus]) -> list[P
             if policy:
                 up_bps = int(policy.upload_bps or 0)
                 dl_bps = int(policy.download_bps or 0)
-                is_limited = bool(policy.is_blocked or up_bps > 0 or dl_bps > 0)
+                is_limited = bool(
+                    policy.is_blocked or 
+                    getattr(policy, "is_up_blocked", False) or 
+                    getattr(policy, "is_dl_blocked", False) or 
+                    up_bps > 0 or 
+                    dl_bps > 0
+                )
                 if is_limited:
                     limit_summary = policy.summary or "已限速"
 

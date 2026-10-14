@@ -129,6 +129,10 @@ TRANSLATIONS = {
         "tray_minimized_msg": "程序已最小化至系统托盘，限速与断网策略持续在后台生效。",
         "tray_restore_title": "网络已紧急恢复",
         "tray_restore_done": "已清除所有限速与阻断策略，所有程序网络恢复正常。",
+        "engine_display_windivert": "🚀 内核驱动整形 (WinDivert 硬件级精准)",
+        "engine_display_downgraded": "🛡️ 原生组策略引擎 (驱动受阻已自动降级)",
+        "engine_display_native": "🛡️ 原生组策略引擎 (Windows QoS 出站整形 + 防火墙)",
+        "already_running": "ProcessNetLimiter 正在后台或系统托盘中运行，无需重复启动。",
         "autostart_enabled_msg": "已开启开机静默启动 (通过系统计划任务)",
         "autostart_disabled_msg": "已关闭开机静默启动"
     },
@@ -250,6 +254,10 @@ TRANSLATIONS = {
         "tray_minimized_msg": "Application minimized to system tray. Rate limiting and blocking rules remain active.",
         "tray_restore_title": "Network Restored",
         "tray_restore_done": "All rate limits and blocks have been cleared. Normal traffic restored.",
+        "engine_display_windivert": "🚀 Kernel Traffic Shaper (WinDivert Hardware-Grade)",
+        "engine_display_downgraded": "🛡️ Native QoS Engine (Driver Blocked, Downgraded)",
+        "engine_display_native": "🛡️ Native QoS Engine (Windows QoS Egress + Firewall)",
+        "already_running": "ProcessNetLimiter is already running in background or system tray.",
         "autostart_enabled_msg": "Auto-start on logon enabled (via Task Scheduler)",
         "autostart_disabled_msg": "Auto-start on logon disabled"
     }

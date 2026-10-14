@@ -9,6 +9,8 @@ WinDivert 内核级流量整形引擎 (高精度无阻塞延迟调度架构)
 """
 import time
 import queue
+import heapq
+import socket
 import threading
 import logging
 import re
@@ -22,14 +24,15 @@ logger = logging.getLogger("WinDivertEngine")
 
 
 class TokenBucket:
-    """高精度字节级令牌桶算法"""
-    def __init__(self, rate_bytes_per_sec: float, capacity: float = 0, is_blocked: bool = False):
+    """高精度字节级令牌桶算法（赤字欠账式平滑调度与硬封顶架构）"""
+    def __init__(self, rate_bytes_per_sec: float, capacity: float = 0, is_blocked: bool = False, max_pacing_delay: float = 0.05):
         self.rate_bytes_per_sec = float(rate_bytes_per_sec)
         # 桶容量设置为较小突发（例如 0.5 秒或最低 2048 字节），防止初始突发过高穿透限速
         self.capacity = float(capacity) if capacity > 0 else max(2048.0, self.rate_bytes_per_sec * 0.5)
         self.tokens = self.capacity
         self.last_refill = time.perf_counter()
         self.is_blocked = is_blocked
+        self.max_pacing_delay = float(max_pacing_delay)
         self._lock = threading.Lock()
 
     def update_rate(self, rate_bytes_per_sec: float, is_blocked: bool = False):
@@ -50,12 +53,15 @@ class TokenBucket:
 
     def consume(self, num_bytes: int, now: float = None) -> tuple[bool, float]:
         """
-        尝试扣减令牌。
+        尝试扣减令牌（欠账赤字式调度）：
         返回 (is_allowed, wait_time)
         - 如果完全阻断：返回 (False, -1.0)
         - 如果不设限制：返回 (True, 0.0)
         - 如果令牌充足：扣减并返回 (True, 0.0)
-        - 如果令牌不足：返回 (False, 需要等待的时间秒数)
+        - 如果令牌不足但处于可整形窗口 (wait <= max_pacing_delay)：
+          将赤字计入负令牌（欠账），允许进入 Pacer 队列，返回 (False, wait_time)
+        - 如果严重超额 (wait > max_pacing_delay)：
+          不计入赤字（直接丢弃），返回 (False, wait_time)
         """
         with self._lock:
             if self.is_blocked:
@@ -73,6 +79,10 @@ class TokenBucket:
             else:
                 deficit = num_bytes - self.tokens
                 wait_time = deficit / self.rate_bytes_per_sec
+                # 只有在可平滑延迟窗口内，才计入负债以备 Pacer 延时重注入
+                # 这样进入延迟队列的数据包也严格消耗带宽，彻底杜绝 2 倍超速漏洞
+                if wait_time <= self.max_pacing_delay:
+                    self.tokens -= num_bytes
                 return False, wait_time
 
 
@@ -82,10 +92,16 @@ class ProcessRule:
     app_path: str
     up_bucket: TokenBucket
     dl_bucket: TokenBucket
-    is_blocked: bool
-    up_rate_bps: int
-    dl_rate_bps: int
-    summary: str
+    is_up_blocked: bool = False
+    is_dl_blocked: bool = False
+    up_rate_bps: int = 0
+    dl_rate_bps: int = 0
+    summary: str = "未限制"
+
+    @property
+    def is_blocked(self) -> bool:
+        """向后兼容属性：任意方向被阻断时为 True"""
+        return self.is_up_blocked or self.is_dl_blocked
 
 
 class WinDivertEngine:
@@ -94,8 +110,8 @@ class WinDivertEngine:
     """
     def __init__(self):
         self.rules: dict[str, ProcessRule] = {}  # key: lower app name, e.g. "steam.exe"
-        self.port_to_rules: dict[int, ProcessRule] = {}  # key: local port (原子替换，免锁读取)
-        self.port_to_app: dict[int, str] = {}  # key: local port -> app_name (全部活跃网络进程映射)
+        self.port_to_rules: dict[object, ProcessRule] = {}  # key: (proto, port) or port (原子替换，免锁读取)
+        self.port_to_app: dict[object, str] = {}  # key: (proto, port) or port -> app_name
         self.traffic_monitor = TrafficMonitor()
         self._lock = threading.RLock()
         self._running = False
@@ -104,6 +120,9 @@ class WinDivertEngine:
         self._divert_thread = None
         self._tracker_thread = None
         self._pacer_thread = None
+        self._pacer_cond = threading.Condition(threading.Lock())
+        self._pacer_heap: list[tuple[float, int, object]] = []
+        self._pacer_seq = 0
         self._pacing_queue = queue.Queue(maxsize=300)
         self._driver_last_error = ""
         self.driver_diag_code = 0
@@ -208,29 +227,49 @@ class WinDivertEngine:
                 up_bps = self.speed_str_to_bps(req.upload_speed_type, req.custom_upload_val, req.custom_upload_unit)
                 dl_bps = self.speed_str_to_bps(req.download_speed_type, req.custom_download_val, req.custom_download_unit)
 
-                is_blocked = (req.upload_speed_type == "block" or req.download_speed_type == "block")
+                is_up_blocked = (req.upload_speed_type == "block")
+                is_dl_blocked = (req.download_speed_type == "block")
+                is_blocked = (is_up_blocked and is_dl_blocked)
 
                 # 计算每秒字节数
                 up_bytes_sec = (up_bps // 8) if up_bps > 0 else 0
                 dl_bytes_sec = (dl_bps // 8) if dl_bps > 0 else 0
 
-                # 构造摘要文字
-                summary = format_policy_summary(
-                    is_blocked=is_blocked,
-                    up_bps=up_bps,
-                    dl_bps=dl_bps,
-                    block_tag="⛔ 完全断网 (内核硬阻断)"
-                )
+                # 构造摘要文字 (单向阻断精细化显示)
+                if is_up_blocked and is_dl_blocked:
+                    summary = "⛔ 完全断网 (内核硬阻断)"
+                elif is_up_blocked:
+                    summary = format_policy_summary(
+                        is_blocked=False,
+                        up_bps=0,
+                        dl_bps=dl_bps,
+                        block_tag="⛔ 上传断开"
+                    ) + " (上行阻断)"
+                elif is_dl_blocked:
+                    summary = format_policy_summary(
+                        is_blocked=False,
+                        up_bps=up_bps,
+                        dl_bps=0,
+                        block_tag="⛔ 下载断开"
+                    ) + " (下行阻断)"
+                else:
+                    summary = format_policy_summary(
+                        is_blocked=False,
+                        up_bps=up_bps,
+                        dl_bps=dl_bps,
+                        block_tag="⛔ 完全断网 (内核硬阻断)"
+                    )
 
-                up_bucket = TokenBucket(rate_bytes_per_sec=up_bytes_sec, is_blocked=is_blocked)
-                dl_bucket = TokenBucket(rate_bytes_per_sec=dl_bytes_sec, is_blocked=is_blocked)
+                up_bucket = TokenBucket(rate_bytes_per_sec=up_bytes_sec, is_blocked=is_up_blocked)
+                dl_bucket = TokenBucket(rate_bytes_per_sec=dl_bytes_sec, is_blocked=is_dl_blocked)
 
                 rule = ProcessRule(
                     app_name=clean_name,
                     app_path=req.app_path,
                     up_bucket=up_bucket,
                     dl_bucket=dl_bucket,
-                    is_blocked=is_blocked,
+                    is_up_blocked=is_up_blocked,
+                    is_dl_blocked=is_dl_blocked,
                     up_rate_bps=up_bps,
                     dl_rate_bps=dl_bps,
                     summary=summary
@@ -293,6 +332,11 @@ class WinDivertEngine:
                 pass
             self._divert_handle = None
 
+        # 清空并唤醒 Pacer 调度堆
+        with self._pacer_cond:
+            self._pacer_heap.clear()
+            self._pacer_cond.notify_all()
+
         # 安全回收工作线程
         for th in [self._divert_thread, self._pacer_thread, self._tracker_thread]:
             if th and th.is_alive():
@@ -305,7 +349,7 @@ class WinDivertEngine:
         self._pacer_thread = None
         self._tracker_thread = None
 
-        # 清空延迟调度队列
+        # 清空兼容队列
         while not self._pacing_queue.empty():
             try:
                 self._pacing_queue.get_nowait()
@@ -352,13 +396,13 @@ class WinDivertEngine:
         return True, ""
 
     def _scan_and_update_ports(self):
-        """扫描活动连接并在锁外构建端口映射表，实现极速原子赋值"""
+        """扫描活动连接并在锁外构建端口映射表，实现极速原子赋值与协议区分"""
         try:
             with self._lock:
                 target_names = set(self.rules.keys())
 
-            new_port_map: dict[int, ProcessRule] = {}
-            new_port_to_app: dict[int, str] = {}
+            new_port_map: dict[object, ProcessRule] = {}
+            new_port_to_app: dict[object, str] = {}
             pids_to_name: dict[int, str] = {}
             pids_to_rules: dict[int, ProcessRule] = {}
 
@@ -377,10 +421,18 @@ class WinDivertEngine:
 
             for c in psutil.net_connections(kind='all'):
                 if c.pid and c.laddr and hasattr(c.laddr, 'port') and c.laddr.port > 0:
+                    port = c.laddr.port
+                    proto = "TCP" if c.type == socket.SOCK_STREAM else "UDP"
+                    key_proto = (proto, port)
+
                     if c.pid in pids_to_rules:
-                        new_port_map[c.laddr.port] = pids_to_rules[c.pid]
+                        rule = pids_to_rules[c.pid]
+                        new_port_map[key_proto] = rule
+                        new_port_map[port] = rule  # 兼容单整数端口回退
                     if c.pid in pids_to_name:
-                        new_port_to_app[c.laddr.port] = pids_to_name[c.pid]
+                        name = pids_to_name[c.pid]
+                        new_port_to_app[key_proto] = name
+                        new_port_to_app[port] = name
 
             # 原子指针替换，工作收包线程读取时绝对免锁！
             self.port_to_rules = new_port_map
@@ -404,35 +456,41 @@ class WinDivertEngine:
     def _pacer_loop(self):
         """
         独立延迟发送整形线程 (Pacer)：
-        专用处理被限速数据包的微秒级平滑延迟放行，彻底消除主收包线程的时延阻塞
+        专用处理被限速数据包的微秒级平滑延迟放行，使用小顶堆最小延迟调度避免队头阻塞
         """
         while self._running and not self._stop_event.is_set():
-            try:
-                item = self._pacing_queue.get(timeout=0.02)
-            except queue.Empty:
-                continue
-            except Exception:
-                break
+            packet_to_send = None
+            with self._pacer_cond:
+                while not self._pacer_heap and self._running and not self._stop_event.is_set():
+                    self._pacer_cond.wait(timeout=0.02)
 
-            send_at, packet = item
-            now = time.perf_counter()
-            wait_left = send_at - now
-            if wait_left > 0:
-                time.sleep(min(wait_left, 0.05))
+                if not self._running or self._stop_event.is_set():
+                    break
 
-            handle = self._divert_handle
-            if handle is not None and self._running:
-                try:
-                    handle.send(packet)
-                except Exception:
-                    pass
+                if self._pacer_heap:
+                    now = time.perf_counter()
+                    send_at, _, pkt = self._pacer_heap[0]
+                    wait_left = send_at - now
+                    if wait_left > 0:
+                        self._pacer_cond.wait(timeout=min(wait_left, 0.05))
+                    else:
+                        heapq.heappop(self._pacer_heap)
+                        packet_to_send = pkt
+
+            if packet_to_send is not None:
+                handle = self._divert_handle
+                if handle is not None and self._running:
+                    try:
+                        handle.send(packet_to_send)
+                    except Exception:
+                        pass
 
     def _divert_loop(self, ready_event: threading.Event, start_error: list):
         """
         WinDivert 核心数据包拦截与高速分发循环：
         - 严禁任何 sleep 阻塞！
         - 非受限数据包直接 0 延迟放行，保证全系统其他程序网络毫秒级畅通
-        - 受限数据包根据令牌桶状态直接放行或提交延迟队列
+        - 受限数据包根据令牌桶状态直接放行或提交延迟优先队列
         """
         try:
             import pydivert
@@ -471,11 +529,14 @@ class WinDivertEngine:
                             divert.send(packet)
                             continue
 
-                    # 极速哈希匹配端口 (读取原子字典，零锁争用)
+                    # 极速哈希匹配端口与协议 (读取原子字典，零锁争用)
                     is_outbound = packet.is_outbound
                     port_to_check = packet.src_port if is_outbound else packet.dst_port
-                    rule = self.port_to_rules.get(port_to_check)
-                    app_name = rule.app_name if rule else self.port_to_app.get(port_to_check)
+                    proto_str = "TCP" if (hasattr(packet, 'tcp') and packet.tcp) else "UDP"
+                    proto_key = (proto_str, port_to_check)
+
+                    rule = self.port_to_rules.get(proto_key) or self.port_to_rules.get(port_to_check)
+                    app_name = rule.app_name if rule else (self.port_to_app.get(proto_key) or self.port_to_app.get(port_to_check))
                     pkt_len = len(packet.raw) if hasattr(packet, 'raw') and packet.raw else 1500
 
                     # 记录实时流量统计
@@ -487,25 +548,24 @@ class WinDivertEngine:
                         divert.send(packet)
                         continue
 
-                    # 若规则为“完全阻断”：直接丢弃 (不 send)
-                    if rule.is_blocked:
+                    # 若规则判定当前方向为独立阻断：直接丢弃 (不 send)
+                    is_blocked = rule.is_up_blocked if is_outbound else rule.is_dl_blocked
+                    if is_blocked:
                         continue
 
                     # 令牌桶消耗判定
                     bucket = rule.up_bucket if is_outbound else rule.dl_bucket
-                    pkt_len = len(packet.raw) if hasattr(packet, 'raw') and packet.raw else 1500
-
                     allowed, wait_sec = bucket.consume(pkt_len)
                     if allowed:
                         divert.send(packet)
                     else:
                         if wait_sec > 0 and wait_sec <= 0.05:
-                            # 将延迟数据包异步推送到 Pacer 队列，收包线程绝不等待！
-                            try:
-                                self._pacing_queue.put_nowait((time.perf_counter() + wait_sec, packet))
-                            except queue.Full:
-                                # 队列满时丢弃，有效触发 TCP 拥塞控制滑动窗口紧缩
-                                continue
+                            # 将延迟数据包异步推送到 Pacer 优先队列，收包线程绝不等待！
+                            with self._pacer_cond:
+                                if len(self._pacer_heap) < 300:
+                                    self._pacer_seq += 1
+                                    heapq.heappush(self._pacer_heap, (time.perf_counter() + wait_sec, self._pacer_seq, packet))
+                                    self._pacer_cond.notify()
                         else:
                             # 超出延迟阈值丢弃，锁定硬速率上限
                             continue

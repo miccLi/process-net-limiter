@@ -572,14 +572,14 @@ class MainWindow(QMainWindow):
             if hasattr(self, "traffic_badge") and self.traffic_badge:
                 self.traffic_badge.setText(f"↑ {up_str}   ↓ {down_str}")
 
-            # 2. 刷新进程家族树的各应用速率列
-            app_rates = self.engine.get_process_rates()
-            if hasattr(self, "tree") and self.tree:
+            # 2. 刷新进程家族树的各应用速率列 (若窗口最小化到托盘隐藏，跳过DOM微刷新以降低CPU开销)
+            if self.isVisible() and hasattr(self, "tree") and self.tree:
+                app_rates = self.engine.get_process_rates()
                 self.tree.update_speeds(app_rates)
 
-            # 3. 动态刷新托盘悬浮提示
-            if hasattr(self, "tray") and self.tray:
-                limited_cnt = sum(1 for f in self.tree.displayed_families if f.is_limited)
+            # 3. 动态刷新托盘悬浮提示 (全量统计所有受限家族，不受当前筛选过滤器影响)
+            if hasattr(self, "tray") and self.tray and hasattr(self, "tree") and self.tree:
+                limited_cnt = sum(1 for f in self.tree.families_data if f.is_limited)
                 self.tray.update_tooltip_rates(up_str, down_str, limited_cnt)
         except Exception:
             pass
@@ -757,8 +757,8 @@ class MainWindow(QMainWindow):
             return
 
         def _do_restore():
-            policies = self.engine.remove_all_limits()
-            return True, "Emergency restore complete", policies
+            ok, msg, policies = self.engine.remove_all_limits()
+            return ok, msg, policies
 
         self._set_busy(True, t("action_reset"))
         self._active_worker = AsyncWorker(_do_restore)

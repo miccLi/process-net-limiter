@@ -79,11 +79,33 @@ def restart_as_admin() -> bool:
         print(f"UAC提权重启失败: {e}")
         return False
 
-def run_powershell_script(script: str) -> tuple[bool, str]:
+def acquire_single_instance_mutex(mutex_name: str = "ProcessNetLimiter_SingleInstance_Mutex") -> tuple[bool, object]:
+    """
+    使用 Windows 命名互斥体检查并保持单实例运行。
+    若成功获得唯一运行权，返回 (True, mutex_handle)；
+    若已有前置实例在运行，返回 (False, None)。
+    """
+    if sys.platform != "win32":
+        return True, None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        ERROR_ALREADY_EXISTS = 183
+        # 创建命名互斥体
+        handle = kernel32.CreateMutexW(None, False, f"Local\\{mutex_name}")
+        last_error = kernel32.GetLastError()
+        if last_error == ERROR_ALREADY_EXISTS:
+            if handle:
+                kernel32.CloseHandle(handle)
+            return False, None
+        return True, handle
+    except Exception:
+        return True, None
+
+def run_powershell_script(script: str, timeout: int = 25) -> tuple[bool, str]:
     """
     执行指定的 PowerShell 脚本。
     使用标准输入管道 (-Command -) 避免触发 Windows 命令行 32KB 长度截断与控制字符注入。
-    优先使用免窗体快速子进程执行；若非管理员且执行失败，则调起 UAC 提权。
+    优先使用免窗体快速子进程执行；带超时保护防死锁；若非管理员且执行失败，则调起 UAC 提权。
     """
     creation_flags = 0x08000000  # subprocess.CREATE_NO_WINDOW
     
@@ -96,13 +118,16 @@ def run_powershell_script(script: str) -> tuple[bool, str]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=creation_flags
+            creationflags=creation_flags,
+            timeout=timeout
         )
         if res.returncode == 0:
             return True, (res.stdout + "\n" + res.stderr).strip()
         # 若是管理员且失败，直接返回错误信息
         if is_admin():
             return False, (res.stdout + "\n" + res.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return False, f"PowerShell 命令执行超时 ({timeout}s)"
     except Exception as e:
         if is_admin():
             return False, str(e)
@@ -131,7 +156,8 @@ def run_powershell_script(script: str) -> tuple[bool, str]:
             input=elevate_cmd,
             capture_output=True,
             text=True,
-            creationflags=creation_flags
+            creationflags=creation_flags,
+            timeout=timeout + 15
         )
         
         out_content = ""
@@ -149,6 +175,8 @@ def run_powershell_script(script: str) -> tuple[bool, str]:
         else:
             err_msg = out_content or (res.stderr.strip() if res.stderr else "管理员提权未授权或执行被用户取消")
             return False, err_msg
+    except subprocess.TimeoutExpired:
+        return False, f"管理员提权执行超时 ({timeout + 15}s)"
     except Exception as e:
         return False, str(e)
     finally:

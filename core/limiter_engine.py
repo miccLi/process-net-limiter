@@ -10,9 +10,12 @@ import re
 import json
 import os
 import hashlib
+import logging
 from dataclasses import dataclass
 from core.uac_manager import run_powershell_script
-from core.speed_utils import speed_str_to_bps as util_speed_str_to_bps, format_policy_summary
+from core.speed_utils import speed_str_to_bps as util_speed_str_to_bps, format_policy_summary, format_speed_display
+
+logger = logging.getLogger("LimiterEngine")
 
 QOS_PREFIX = "NetLimit_QoS_"
 FW_PREFIX = "NetLimit_Block_"
@@ -40,6 +43,8 @@ SYSTEM_PROTECTED_EXES = {
 class PolicyStatus:
     app_name: str
     is_blocked: bool = False
+    is_up_blocked: bool = False
+    is_dl_blocked: bool = False
     upload_bps: int = 0
     download_bps: int = 0
     summary: str = "未限制"
@@ -94,13 +99,15 @@ class LimiterEngine:
 
     @staticmethod
     def get_query_policies_ps_script() -> str:
-        """生成查询当前所有活动策略的 PowerShell 脚本片段"""
+        """生成查询当前所有活动策略的高性能 PowerShell 脚本片段 (支持分组高速匹配)"""
         return f"""
 $qos1 = Get-NetQosPolicy -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -like '{QOS_PREFIX}*' }}
 $qos2 = Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -like '{QOS_PREFIX}*' }}
 $allQos = @($qos1) + @($qos2) | Select-Object -Unique Name, AppPathNameMatchCondition, ThrottleRateAction, ThrottleRateActionBitsPerSecond
 
-$fw = Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -like '{FW_PREFIX}*' }} | Select-Object DisplayName, Direction, Action, Description
+$fwGroup = Get-NetFirewallRule -Group 'ProcessNetLimiter' -ErrorAction SilentlyContinue | Select-Object DisplayName, Direction, Action, Description
+$fwLegacy = Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -like '{FW_PREFIX}*' }} | Select-Object DisplayName, Direction, Action, Description
+$fw = @($fwGroup) + @($fwLegacy) | Select-Object -Unique DisplayName, Direction, Action, Description
 
 Write-Output "---POLICY_JSON_START---"
 [PSCustomObject]@{{
@@ -150,21 +157,29 @@ Write-Output "---POLICY_JSON_END---"
                     rate = 0
 
                 direction = "ALL"
-                app_name = ""
                 if name.startswith(f"{QOS_PREFIX}UP_"):
                     direction = "UP"
-                    app_name = name[len(f"{QOS_PREFIX}UP_"):]
                 elif name.startswith(f"{QOS_PREFIX}DL_"):
                     direction = "DL"
-                    app_name = name[len(f"{QOS_PREFIX}DL_"):]
                 elif name.startswith(f"{QOS_PREFIX}ALL_"):
                     direction = "ALL"
-                    app_name = name[len(f"{QOS_PREFIX}ALL_"):]
-                elif name.startswith(QOS_PREFIX):
-                    app_name = name[len(QOS_PREFIX):]
 
-                if not app_name and app_path:
-                    app_name = app_path.split("\\")[-1]
+                app_name = ""
+                # 优先从 AppPathNameMatchCondition 提取真实应用程序文件名 (包含 .exe)
+                if app_path:
+                    clean_path = app_path.strip().strip("'\"").replace("/", "\\")
+                    app_name = os.path.basename(clean_path).strip()
+
+                # 如果无法从 AppPathNameMatchCondition 获取，再从规则名称中反解
+                if not app_name:
+                    if name.startswith(f"{QOS_PREFIX}UP_"):
+                        app_name = name[len(f"{QOS_PREFIX}UP_"):]
+                    elif name.startswith(f"{QOS_PREFIX}DL_"):
+                        app_name = name[len(f"{QOS_PREFIX}DL_"):]
+                    elif name.startswith(f"{QOS_PREFIX}ALL_"):
+                        app_name = name[len(f"{QOS_PREFIX}ALL_"):]
+                    elif name.startswith(QOS_PREFIX):
+                        app_name = name[len(QOS_PREFIX):]
 
                 if not app_name:
                     continue
@@ -189,6 +204,7 @@ Write-Output "---POLICY_JSON_END---"
             for item in fw_list:
                 dname = str(item.get("DisplayName") or "")
                 desc = str(item.get("Description") or "")
+                direction = item.get("Direction")
                 if dname.startswith(FW_PREFIX):
                     app_name = ""
                     # 优先从 Description 中的 [app=xxx] 读取原始程序名称 (支持中文与特殊字符)
@@ -203,19 +219,32 @@ Write-Output "---POLICY_JSON_END---"
                         app_name_lower = app_name.lower()
                         if app_name_lower not in results:
                             results[app_name_lower] = PolicyStatus(app_name=app_name)
-                        results[app_name_lower].is_blocked = True
+
+                        st = results[app_name_lower]
+                        if dname.endswith("_Out") or direction in (2, "Outbound", "2"):
+                            st.is_up_blocked = True
+                        if dname.endswith("_In") or direction in (1, "Inbound", "1"):
+                            st.is_dl_blocked = True
+                        st.is_blocked = (st.is_up_blocked and st.is_dl_blocked) or (not dname.endswith("_Out") and not dname.endswith("_In"))
 
             # 3. 构造显示摘要 (安全防 None)
             for status in results.values():
-                status.summary = format_policy_summary(
-                    is_blocked=status.is_blocked,
-                    up_bps=int(status.upload_bps or 0),
-                    dl_bps=int(status.download_bps or 0),
-                    block_tag="⛔ 完全断网"
-                )
+                if status.is_blocked or (status.is_up_blocked and status.is_dl_blocked):
+                    status.summary = "⛔ 完全断网"
+                elif status.is_up_blocked:
+                    status.summary = "⛔ 上行断网" + (f" | 下: {format_speed_display(status.download_bps)}" if status.download_bps > 0 else "")
+                elif status.is_dl_blocked:
+                    status.summary = (f"上: {format_speed_display(status.upload_bps)} | " if status.upload_bps > 0 else "") + "⛔ 下行断网"
+                else:
+                    status.summary = format_policy_summary(
+                        is_blocked=False,
+                        up_bps=int(status.upload_bps or 0),
+                        dl_bps=int(status.download_bps or 0),
+                        block_tag="⛔ 完全断网"
+                    )
 
         except Exception as e:
-            print(f"解析活动策略日志: {e}")
+            logger.debug(f"解析活动策略异常: {e}")
 
         return results
 
@@ -239,7 +268,7 @@ Write-Output "---POLICY_JSON_END---"
         for req in requests:
             clean = req.app_name.strip()
             if clean.lower() in SYSTEM_PROTECTED_EXES:
-                print(f"[安全拦截] 忽略对系统核心保护进程 '{clean}' 的限速或阻断操作")
+                logger.warning(f"[安全拦截] 忽略对系统核心保护进程 '{clean}' 的限速或阻断操作")
                 continue
             valid_requests.append(req)
 
@@ -274,6 +303,9 @@ Write-Output "---POLICY_JSON_END---"
             up_bps = self.speed_str_to_bps(req.upload_speed_type, req.custom_upload_val, req.custom_upload_unit)
             dl_bps = self.speed_str_to_bps(req.download_speed_type, req.custom_download_val, req.custom_download_unit)
 
+            is_up_block = (req.upload_speed_type == "block")
+            is_dl_block = (req.download_speed_type == "block")
+
             # 清理该程序的旧策略 (同时清理哈希唯一命名与兼容旧版本命名)
             commands.append(f"""
 Remove-NetQosPolicy -Name '{QOS_PREFIX}*_{safe_name}' -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
@@ -284,28 +316,28 @@ Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}*' -ErrorAction Silen
 Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{legacy_safe}*' -ErrorAction SilentlyContinue
             """)
 
-            # 检查是否为“完全断开连接” (使用 Windows 内核防火墙强力阻断入站与出站)
-            if req.upload_speed_type == "block" or req.download_speed_type == "block":
+            # 检查是否包含断网 (使用 Windows 内核防火墙强力阻断入站或出站)
+            if is_up_block or is_dl_block:
                 target_exe = app_path if (app_path and os.path.exists(app_path)) else self.get_process_exe_path(clean_app)
                 if not target_exe or not os.path.exists(target_exe):
                     # 关键安全防护：严禁创建不带 -Program 的全局防火墙阻断规则，否则会导致整机网络瘫痪！
-                    print(f"[安全跳过] 无法定位程序 '{clean_app}' 的有效可执行文件路径，跳过防火墙阻断规则下发以防止整机断网。")
-                    continue
-
-                escaped_prog = target_exe.replace("'", "''")
-                commands.append(f"""
-New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_Out' -Direction Outbound -Action Block -Program '{escaped_prog}' -Description 'ProcessNetLimiter 阻断规则 [app={escaped_app}]' -ErrorAction SilentlyContinue | Out-Null
-New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Direction Inbound -Action Block -Program '{escaped_prog}' -Description 'ProcessNetLimiter 阻断规则 [app={escaped_app}]' -ErrorAction SilentlyContinue | Out-Null
-                """)
-            else:
-                # QoS 速度限制 (使用转义后的 escaped_app 防止命令注入)
-                if up_bps > 0 and (up_bps == dl_bps):
-                    commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}ALL_{safe_name}' -AppPathNameMatchCondition '{escaped_app}' -ThrottleRateActionBitsPerSecond {up_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
+                    logger.warning(f"[安全跳过] 无法定位程序 '{clean_app}' 的有效可执行文件路径，跳过防火墙阻断规则下发以防止整机断网。")
                 else:
-                    if up_bps > 0:
-                        commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}UP_{safe_name}' -AppPathNameMatchCondition '{escaped_app}' -ThrottleRateActionBitsPerSecond {up_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
-                    if dl_bps > 0:
-                        commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}DL_{safe_name}' -AppPathNameMatchCondition '{escaped_app}' -ThrottleRateActionBitsPerSecond {dl_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
+                    escaped_prog = target_exe.replace("'", "''")
+                    if is_up_block:
+                        commands.append(f"""
+New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_Out' -Group 'ProcessNetLimiter' -Direction Outbound -Action Block -Program '{escaped_prog}' -Description 'ProcessNetLimiter 阻断规则 [app={escaped_app}]' -ErrorAction SilentlyContinue | Out-Null
+                        """)
+                    if is_dl_block:
+                        commands.append(f"""
+New-NetFirewallRule -DisplayName '{FW_PREFIX}{safe_name}_In' -Group 'ProcessNetLimiter' -Direction Inbound -Action Block -Program '{escaped_prog}' -Description 'ProcessNetLimiter 阻断规则 [app={escaped_app}]' -ErrorAction SilentlyContinue | Out-Null
+                        """)
+
+            # QoS 速度限制 (Windows 原生 QoS 为内核出站整形)
+            if not is_up_block:
+                effective_bps = up_bps if up_bps > 0 else (dl_bps if dl_bps > 0 else 0)
+                if effective_bps > 0:
+                    commands.append(f"New-NetQosPolicy -Name '{QOS_PREFIX}UP_{safe_name}' -AppPathNameMatchCondition '{escaped_app}' -ThrottleRateActionBitsPerSecond {effective_bps} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null")
 
         # 追加策略查询，单次执行搞定！
         commands.append(self.get_query_policies_ps_script())
@@ -360,11 +392,11 @@ Remove-NetFirewallRule -DisplayName '{FW_PREFIX}{legacy_safe}*' -ErrorAction Sil
         script = f"""
         $q1 = Get-NetQosPolicy -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -like '{QOS_PREFIX}*' }}
         $q2 = Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -like '{QOS_PREFIX}*' }}
-        $fw = Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -like '{FW_PREFIX}*' }}
         
         $q1 | Remove-NetQosPolicy -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
         $q2 | Remove-NetQosPolicy -Confirm:$false -ErrorAction SilentlyContinue
-        $fw | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+        Remove-NetFirewallRule -Group 'ProcessNetLimiter' -ErrorAction SilentlyContinue
+        Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.DisplayName -like '{FW_PREFIX}*' }} | Remove-NetFirewallRule -ErrorAction SilentlyContinue
         
         {self.get_query_policies_ps_script()}
         """

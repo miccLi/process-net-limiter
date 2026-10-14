@@ -51,17 +51,32 @@ class EngineManager:
         except Exception:
             pass
 
+        # 启动时全量注水：将磁盘中持久化的所有规则预载入引擎内存
+        if self.rules_store:
+            try:
+                persisted_reqs = self.rules_store.get_all_requests()
+                if persisted_reqs:
+                    self.apply_limits_batch(persisted_reqs, persist=False)
+                    logger.info(f"引擎启动时已成功预载入 {len(persisted_reqs)} 条持久化规则")
+            except Exception as e:
+                logger.warning(f"预载入持久化规则失败: {e}")
+
     @property
     def active_engine_name(self) -> str:
         return "WINDIVERT" if self.use_windivert else "NATIVE"
 
     @property
     def active_engine_display(self) -> str:
+        from core.i18n import t
+        val_wd = t("engine_display_windivert")
+        val_down = t("engine_display_downgraded")
+        val_nat = t("engine_display_native")
+
         if self.use_windivert:
-            return "🚀 内核驱动整形 (WinDivert 硬件级精准)"
+            return val_wd if val_wd != "engine_display_windivert" else "🚀 内核驱动整形 (WinDivert 硬件级精准)"
         if self.is_downgraded:
-            return "🛡️ 原生组策略引擎 (驱动受阻已自动降级)"
-        return "🛡️ 原生组策略引擎 (Windows QoS 出站整形 + 防火墙)"
+            return val_down if val_down != "engine_display_downgraded" else "🛡️ 原生组策略引擎 (驱动受阻已自动降级)"
+        return val_nat if val_nat != "engine_display_native" else "🛡️ 原生组策略引擎 (Windows QoS 出站整形 + 防火墙)"
 
     def get_active_policies(self) -> dict[str, PolicyStatus]:
         """获取当前生效的所有策略 (融合 WinDivert 内存策略与系统持久化防火墙策略)"""
@@ -77,25 +92,24 @@ class EngineManager:
         return policies
 
     def apply_limits_batch(self, requests: list[LimitRequest], persist: bool = True) -> tuple[bool, str, dict[str, PolicyStatus]]:
-        """批量应用策略 (支持持久化存储与驱动失败时自动平滑降级至原生引擎)"""
-        # 1. 持久化存储规则到本地磁盘
-        if persist and self.rules_store:
-            try:
-                self.rules_store.save_requests_batch(requests)
-            except Exception as e:
-                logger.warning(f"持久化存储规则失败: {e}")
-
+        """批量应用策略 (先底层生效后持久化存储，驱动失败时自动平滑降级至原生引擎)"""
         if self.use_windivert:
-            # 2. 在 WinDivert 内存引擎中下发毫秒级规则
+            # 1. 在 WinDivert 内存引擎中下发毫秒级规则
             ok, msg, wd_policies = self.windivert_engine.apply_limits_batch(requests)
 
             # 若 WinDivert 初始化失败，自动平滑降级至 Native 引擎
             if not ok:
                 logger.warning(f"WinDivert 下发失败，自动平滑降级至原生引擎: {msg}")
                 self.fallback_to_native(msg)
-                return self.native_engine.apply_limits_batch(requests)
+                res_ok, res_msg, policies = self.native_engine.apply_limits_batch(requests)
+                if res_ok and persist and self.rules_store:
+                    try:
+                        self.rules_store.save_requests_batch(requests)
+                    except Exception as e:
+                        logger.warning(f"降级后持久化规则失败: {e}")
+                return res_ok, res_msg, policies
 
-            # 3. 对其中“完全断开连接”的请求，同步下发 Windows 防火墙物理阻断，实现双重硬防
+            # 2. 对其中包含“阻断”的请求，同步下发 Windows 防火墙物理阻断，实现双重硬防
             block_reqs = [r for r in requests if (r.upload_speed_type == "block" or r.download_speed_type == "block")]
             if block_reqs:
                 try:
@@ -103,9 +117,22 @@ class EngineManager:
                 except Exception:
                     pass
 
+            # 3. 底层生效成功后，再持久化存储规则到本地磁盘
+            if ok and persist and self.rules_store:
+                try:
+                    self.rules_store.save_requests_batch(requests)
+                except Exception as e:
+                    logger.warning(f"持久化存储规则失败: {e}")
+
             return ok, msg, self.get_active_policies()
         else:
-            return self.native_engine.apply_limits_batch(requests)
+            res_ok, res_msg, policies = self.native_engine.apply_limits_batch(requests)
+            if res_ok and persist and self.rules_store:
+                try:
+                    self.rules_store.save_requests_batch(requests)
+                except Exception as e:
+                    logger.warning(f"持久化存储规则失败: {e}")
+            return res_ok, res_msg, policies
 
     def remove_limits_batch(self, app_names: list[str]) -> tuple[bool, str, dict[str, PolicyStatus]]:
         """批量解除策略 (同时清理 WinDivert、Native 与本地持久化存储，确保不留死角)"""

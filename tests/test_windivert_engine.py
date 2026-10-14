@@ -63,17 +63,42 @@ class TestWinDivertEngine(unittest.TestCase):
         self.assertTrue(ok2)
         self.assertNotIn("game.exe", policies2)
 
+    def test_token_bucket_deficit_accounting(self):
+        """测试：赤字欠账式平滑调度，延迟包预扣减负令牌，杜绝超发"""
+        # 1024 字节/秒，容量 1024，允许缓冲 0.5s 的轻微超额
+        b = TokenBucket(1024, capacity=1024, max_pacing_delay=0.5)
+        t0 = 1000.0
+        b.last_refill = t0
+        b.tokens = 500.0
+
+        # 消耗 800 字节，不足 300 字节，等待 300/1024 ~ 0.29s <= 0.5s
+        allowed, wait = b.consume(800, now=t0)
+        self.assertFalse(allowed)
+        self.assertGreater(wait, 0)
+        # 验证令牌已进入欠账赤字状态 (-300)
+        self.assertAlmostEqual(b.tokens, -300.0, places=2)
+
+        # 超额严重超出 max_pacing_delay (例如请求 10000 字节，需等待近 10 秒)
+        allowed2, wait2 = b.consume(10000, now=t0)
+        self.assertFalse(allowed2)
+        self.assertGreater(wait2, b.max_pacing_delay)
+        # 丢弃的包绝不累积赤字
+        self.assertAlmostEqual(b.tokens, -300.0, places=2)
+
     def test_stop_lifecycle_cleanup(self):
-        """测试：停止引擎时能够干净重置运行标志并清空队列"""
+        """测试：停止引擎时能够干净重置运行标志并清空小顶堆与队列"""
         engine = WinDivertEngine()
         engine._running = True
         engine._pacing_queue.put((time.perf_counter(), "mock_packet"))
+        with engine._pacer_cond:
+            engine._pacer_heap.append((time.perf_counter(), 0, "mock_packet"))
         
         engine.stop()
         
         self.assertFalse(engine._running)
         self.assertTrue(engine._stop_event.is_set())
         self.assertTrue(engine._pacing_queue.empty())
+        self.assertEqual(len(engine._pacer_heap), 0)
 
     def test_engine_manager_facade(self):
         mgr = EngineManager()

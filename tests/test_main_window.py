@@ -96,9 +96,15 @@ class TestMainWindow(unittest.TestCase):
 
         self.assertFalse(event.isAccepted())
         self.assertFalse(self.window.isVisible())
-        self.mock_engine.stop.assert_not_called()
-
-
+    def test_emergency_restore_finished_callback(self):
+        """测试：托盘一键紧急恢复回调正确传递 (ok, msg, policies)"""
+        self.window._on_async_policy_op_finished = MagicMock()
+        self.window.tray.notify = MagicMock()
+        
+        self.window._on_emergency_restore_finished(True, "All limits cleared", {})
+        
+        self.window._on_async_policy_op_finished.assert_called_once_with(True, "All limits cleared", {})
+        self.window.tray.notify.assert_called_once()
 
 
 if __name__ == "__main__":

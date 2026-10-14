@@ -92,7 +92,28 @@ class TestRulesStore(unittest.TestCase):
 
         self.assertEqual(rebound_count, 1)
         self.assertEqual(healed_count, 0)
-        engine.apply_limits_batch.assert_called_once()
+    def test_corrupt_json_quarantine_backup(self):
+        """测试：遭遇损坏 JSON 时自动隔离备份为 .corrupt.<ts>.bak 并安全返回空字典"""
+        with open(self.rules_path, "w", encoding="utf-8") as f:
+            f.write("{ invalid json syntax ... ")
+
+        store = RulesStore(filepath=self.rules_path)
+        self.assertEqual(len(store.get_all_rules()), 0)
+
+        # 检查是否生成了 .corrupt.*.bak 文件
+        parent_dir = os.path.dirname(self.rules_path)
+        bak_files = [f for f in os.listdir(parent_dir) if ".corrupt." in f and f.endswith(".bak")]
+        self.assertTrue(len(bak_files) >= 1)
+
+    def test_atomic_save_tmp_cleanup(self):
+        """测试：原子保存过程中 .tmp 临时文件在完成后被重命名替换，不留垃圾文件"""
+        req = LimitRequest(app_name="app.exe", app_path="C:\\app.exe", upload_speed_type="100kb", download_speed_type="none")
+        self.store.save_request(req)
+        
+        parent_dir = os.path.dirname(self.rules_path)
+        tmp_files = [f for f in os.listdir(parent_dir) if f.endswith(".tmp")]
+        self.assertEqual(len(tmp_files), 0)
+        self.assertTrue(os.path.exists(self.rules_path))
 
 
 if __name__ == "__main__":

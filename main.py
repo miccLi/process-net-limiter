@@ -12,11 +12,37 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 import ctypes
+import logging
+from logging.handlers import RotatingFileHandler
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QGuiApplication
 from PyQt5.QtCore import Qt
-from core.uac_manager import auto_elevate
+from core.uac_manager import auto_elevate, acquire_single_instance_mutex
 from ui.main_window import MainWindow
+
+
+def init_logging():
+    """初始化运行日志系统，落盘至 %LOCALAPPDATA%\\ProcessNetLimiter\\logs\\app.log"""
+    log_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "ProcessNetLimiter", "logs")
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "app.log")
+        handler = RotatingFileHandler(log_file, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
+        handler.setFormatter(formatter)
+        
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+        if not root_logger.handlers:
+            root_logger.addHandler(handler)
+            console = logging.StreamHandler()
+            console.setFormatter(formatter)
+            root_logger.addHandler(console)
+    except Exception as e:
+        print(f"初始化日志异常: {e}")
+
+
+_INSTANCE_MUTEX = None
 
 
 def run_uninstall_cleanup() -> bool:
@@ -58,6 +84,8 @@ def run_uninstall_cleanup() -> bool:
 
 
 def main():
+    init_logging()
+
     # 卸载清理模式：静默执行后直接退出，不创建任何 GUI 界面
     if "--uninstall-cleanup" in sys.argv or "--cleanup" in sys.argv:
         ok = run_uninstall_cleanup()
@@ -67,6 +95,21 @@ def main():
     # 若用户点击“是”，会自动调起管理员进程并退出当前进程；若点击“否”，则以普通权限继续运行
     auto_elevate()
 
+    # 检查进程单实例互斥体 (在确立权限之后)，防止多开实例引发驱动和策略冲突
+    global _INSTANCE_MUTEX
+    is_unique, mutex_handle = acquire_single_instance_mutex()
+    if not is_unique:
+        logging.getLogger("Main").warning("检测到已有 ProcessNetLimiter 实例正在运行，拒绝重复启动。")
+        if sys.platform == "win32":
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "ProcessNetLimiter 正在后台或系统托盘中运行，无需重复启动。\n"
+                "ProcessNetLimiter is already running in background or system tray.",
+                "ProcessNetLimiter",
+                0x40 | 0x10000  # MB_ICONINFORMATION | MB_SETFOREGROUND
+            )
+        sys.exit(0)
+    _INSTANCE_MUTEX = mutex_handle
 
     # 1. Windows 原生 Per-Monitor DPI Aware v2 设置 (彻底解决 125%/150% 缩放模糊与多显示器拖拽伪影)
     if sys.platform == "win32":

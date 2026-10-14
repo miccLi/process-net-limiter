@@ -112,6 +112,12 @@ class TestLimiterEngine(unittest.TestCase):
             "Direction": 2,
             "Action": 4,
             "Description": "ProcessNetLimiter 阻断规则 [app=微信.exe]"
+        },
+        {
+            "DisplayName": "NetLimit_Block_app_12345678_In",
+            "Direction": 1,
+            "Action": 4,
+            "Description": "ProcessNetLimiter 阻断规则 [app=微信.exe]"
         }
     ]
 }
@@ -121,6 +127,29 @@ class TestLimiterEngine(unittest.TestCase):
         self.assertIn("微信.exe", policies)
         self.assertTrue(policies["微信.exe"].is_blocked)
         self.assertEqual(policies["微信.exe"].summary, "⛔ 完全断网")
+
+    def test_parse_qos_app_path_condition(self):
+        """测试：优先从 AppPathNameMatchCondition 解析出真实进程名，解决哈希规则名解析缺陷"""
+        raw_output = """
+---POLICY_JSON_START---
+{
+    "QoS": [
+        {
+            "Name": "NetLimit_QoS_UP_app_4006857d",
+            "AppPathNameMatchCondition": "steam.exe",
+            "ThrottleRateAction": 819200
+        }
+    ],
+    "Firewall": []
+}
+---POLICY_JSON_END---
+"""
+        policies = self.engine.parse_policies_from_output(raw_output)
+        self.assertIn("steam.exe", policies)
+        st = policies["steam.exe"]
+        self.assertEqual(st.upload_bps, 819200)
+        self.assertIn("100 KB/s", st.summary)
+
 
 if __name__ == "__main__":
     unittest.main()

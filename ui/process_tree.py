@@ -400,11 +400,13 @@ class ProcessTreeWidget(QTreeWidget):
         self._emit_selected_count()
 
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
-        widget = self.itemWidget(item, COL_CHECK)
-        if widget:
-            cb = widget.findChild(QCheckBox)
-            if cb and cb.isEnabled():
-                cb.nextCheckState()
+        # 仅当用户明确点击在复选框列 (COL_CHECK) 时才切换勾选框状态，防止查看行或点击其它列时意外切换
+        if column == COL_CHECK:
+            widget = self.itemWidget(item, COL_CHECK)
+            if widget:
+                cb = widget.findChild(QCheckBox)
+                if cb and cb.isEnabled():
+                    cb.nextCheckState()
 
     def select_all(self, selected: bool):
         # 仅对当前筛选展示的项生效，且自动跳过系统保护进程
