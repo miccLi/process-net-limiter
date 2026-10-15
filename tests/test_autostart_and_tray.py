@@ -90,6 +90,47 @@ class TestAutostartAndTray(unittest.TestCase):
 
         self.assertEqual(received, [True])
 
+    @patch("core.autostart_manager.is_autostart_enabled", return_value=False)
+    @patch("subprocess.run")
+    def test_set_autostart_disable_when_not_exist(self, mock_run, mock_is_enabled):
+        """测试：在非英文系统下删除不存在的计划任务时依然能够安全判定为成功"""
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="错误: 系统找不到指定的文件。")
+        ok, msg = set_autostart(False)
+        self.assertTrue(ok)
+        self.assertEqual(msg, "Success")
+
+    @patch("ui.system_tray.is_autostart_enabled")
+    def test_tray_about_to_show_updates_state(self, mock_is_enabled):
+        """测试：托盘菜单弹出前 _on_menu_about_to_show 正确同步自启与窗口显示状态"""
+        mock_is_enabled.return_value = True
+        mock_window = MagicMock()
+        mock_window.isVisible.return_value = False
+        mock_window.engine.active_engine_display = "EngineTest"
+
+        tray = SystemTrayManager(mock_window)
+        # 初始状态
+        tray.action_autostart.setChecked(False)
+
+        # 触发菜单即将展现事件
+        tray._on_menu_about_to_show()
+        self.assertTrue(tray.action_autostart.isChecked(), "应自动校准自启勾选状态")
+        self.assertIn("EngineTest", tray.action_engine.text())
+
+    def test_build_elevation_args(self):
+        """测试：UAC 参数构建在源码与打包模式下正确分流"""
+        from core.uac_manager import _build_elevation_args
+
+        with patch.object(sys, "argv", ["main.py", "--minimized", "--no-elevate"]):
+            with patch.object(sys, "frozen", False, create=True):
+                target_exe, args_str, script_dir = _build_elevation_args()
+                self.assertIn("--minimized", args_str)
+                self.assertNotIn("--no-elevate", args_str)
+                self.assertTrue(args_str.startswith('"'))
+
+            with patch.object(sys, "frozen", True, create=True):
+                target_exe, args_str, script_dir = _build_elevation_args()
+                self.assertEqual(args_str, "--minimized")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -123,7 +123,18 @@ class ProcessTreeWidget(QTreeWidget):
         self.setColumnCount(len(headers))
         self.setHeaderLabels(headers)
         if self.displayed_families:
-            self._render_tree()
+            expanded_fams = self._get_expanded_family_ids()
+            self._render_tree(expanded_fams)
+
+    def _get_expanded_family_ids(self) -> set:
+        """获取当前视图中所有处于展开状态的家族 ID 集合"""
+        expanded = set()
+        for i in range(self.topLevelItemCount()):
+            item = self.topLevelItem(i)
+            fam_id = item.data(0, Qt.UserRole)
+            if fam_id and item.isExpanded():
+                expanded.add(fam_id)
+        return expanded
 
     def update_data(self, families: list[ProcessFamily]):
         """更新家族列表，保持原有的勾选状态与展开状态"""
@@ -410,6 +421,7 @@ class ProcessTreeWidget(QTreeWidget):
 
     def select_all(self, selected: bool):
         # 仅对当前筛选展示的项生效，且自动跳过系统保护进程
+        expanded_fams = self._get_expanded_family_ids()
         for fam in self.displayed_families:
             if selected and fam.is_protected:
                 continue
@@ -419,10 +431,11 @@ class ProcessTreeWidget(QTreeWidget):
                 c.selected = selected
             non_prot = [c for c in fam.children if not c.is_protected]
             fam.selected = bool(selected and non_prot and all(c.selected for c in non_prot))
-        self._render_tree()
+        self._render_tree(expanded_fams)
 
     def invert_selection(self):
         # 仅对当前筛选展示的项生效，且跳过系统保护进程
+        expanded_fams = self._get_expanded_family_ids()
         for fam in self.displayed_families:
             if fam.is_protected:
                 continue
@@ -432,7 +445,7 @@ class ProcessTreeWidget(QTreeWidget):
                 c.selected = not c.selected
             non_prot = [c for c in fam.children if not c.is_protected]
             fam.selected = bool(non_prot and all(c.selected for c in non_prot))
-        self._render_tree()
+        self._render_tree(expanded_fams)
 
     def get_selected_targets(self) -> list[tuple[str, str]]:
         targets = {}
@@ -455,9 +468,7 @@ class ProcessTreeWidget(QTreeWidget):
         轻量级无感刷新实时网速，仅修改文本和前景色，零重绘闪烁，零焦点改变。
         :param app_rates: key 为 app_name.lower()，value 为 (up_bytes_sec, down_bytes_sec)
         """
-        if not app_rates:
-            return
-
+        rates = app_rates or {}
         from core.speed_utils import format_byte_rate
 
         for i in range(self.topLevelItemCount()):
@@ -472,13 +483,13 @@ class ProcessTreeWidget(QTreeWidget):
                 for j in range(child_count):
                     c_item = fam_item.child(j)
                     c_name = c_item.data(1, Qt.UserRole) or ""
-                    c_up, c_dl = app_rates.get(c_name, (0.0, 0.0))
+                    c_up, c_dl = rates.get(c_name, (0.0, 0.0))
                     fam_up += c_up
                     fam_dl += c_dl
                     self._set_speed_item_text(c_item, c_up, c_dl, format_byte_rate)
             else:
                 for c_name in child_names:
-                    u, d = app_rates.get(c_name, (0.0, 0.0))
+                    u, d = rates.get(c_name, (0.0, 0.0))
                     fam_up += u
                     fam_dl += d
 

@@ -65,7 +65,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 ; 若勾选了开机自启，调用计划任务创建
-Filename: "schtasks.exe"; Parameters: "/Create /TN ""ProcessNetLimiter_AutoStart"" /TR """"{app}\{#MyAppExeName}"""" --minimized"" /SC ONLOGON /RL HIGHEST /F"; Flags: runhidden; Tasks: autostart
+Filename: "schtasks.exe"; Parameters: "/Create /TN ""ProcessNetLimiterAutoStart"" /TR """"{app}\{#MyAppExeName}"""" --minimized"" /SC ONLOGON /RL HIGHEST /F"; Flags: runhidden; Tasks: autostart
 
 [UninstallRun]
 ; =====================================================================
@@ -75,7 +75,8 @@ Filename: "schtasks.exe"; Parameters: "/Create /TN ""ProcessNetLimiter_AutoStart
 ; =====================================================================
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--uninstall-cleanup"; Flags: runhidden waituntilterminated
 
-; 注销可能存在的计划任务自启
+; 注销计划任务自启 (包含当前版本标准命名与旧版本兼容命名)
+Filename: "schtasks.exe"; Parameters: "/Delete /TN ""ProcessNetLimiterAutoStart"" /F"; Flags: runhidden
 Filename: "schtasks.exe"; Parameters: "/Delete /TN ""ProcessNetLimiter_AutoStart"" /F"; Flags: runhidden
 
 [UninstallDelete]

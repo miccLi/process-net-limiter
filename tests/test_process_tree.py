@@ -6,7 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtWidgets import QApplication
 
-from ui.process_tree import ProcessTreeWidget
+from ui.process_tree import ProcessTreeWidget, COL_UP_SPEED, COL_DOWN_SPEED
 from core.process_scanner import ProcessFamily, ProcessItem, ProcessCategory
 
 # 确保 QApplication 实例存在 (单例)
@@ -300,6 +300,46 @@ class TestProcessTreeWidget(unittest.TestCase):
         # 3. 验证多进程父节点聚合 (合计: up = 60 KB/s, down = 1.0 MB/s)
         self.assertIn("60.0 KB/s", fam_item_multi.text(COL_UP_SPEED))
         self.assertIn("1.0 MB/s", fam_item_multi.text(COL_DOWN_SPEED))
+
+    def test_select_all_preserves_expanded_families(self):
+        """测试：全选与反选操作时，已展开的家族节点不会被折叠"""
+        child1 = ProcessItem(
+            pid=201, name="sub1.exe", exe_path="C:\\sub1.exe",
+            category=ProcessCategory.GAME, connections_count=1,
+            is_limited=False, limit_summary="正常", sort_priority=1, is_protected=False
+        )
+        child2 = ProcessItem(
+            pid=202, name="sub2.exe", exe_path="C:\\sub2.exe",
+            category=ProcessCategory.GAME, connections_count=1,
+            is_limited=False, limit_summary="正常", sort_priority=1, is_protected=False
+        )
+        fam = ProcessFamily(
+            family_id="game_fam", display_name="Game Fam",
+            category=ProcessCategory.GAME, children=[child1, child2], is_protected=False
+        )
+        self.tree.update_data([fam])
+        self.tree.topLevelItem(0).setExpanded(True)
+        self.assertTrue(self.tree.topLevelItem(0).isExpanded())
+
+        # 执行全选
+        self.tree.select_all(True)
+        self.assertTrue(self.tree.topLevelItem(0).isExpanded(), "全选后家族应依然保持展开")
+
+        # 执行反选
+        self.tree.invert_selection()
+        self.assertTrue(self.tree.topLevelItem(0).isExpanded(), "反选后家族应依然保持展开")
+
+    def test_update_speeds_resets_on_empty(self):
+        """测试：流量归零或传入空映射时，网速文本平滑重置为破折号，不产生历史残留"""
+        self.tree.update_data([self.normal_fam])
+        speeds = {"normal_app.exe": (512000.0, 512000.0)}
+        self.tree.update_speeds(speeds)
+        self.assertIn("KB/s", self.tree.topLevelItem(0).text(COL_UP_SPEED))
+
+        # 模拟流量归零（空字典传入）
+        self.tree.update_speeds({})
+        self.assertEqual(self.tree.topLevelItem(0).text(COL_UP_SPEED), "—")
+        self.assertEqual(self.tree.topLevelItem(0).text(COL_DOWN_SPEED), "—")
 
 
 if __name__ == "__main__":

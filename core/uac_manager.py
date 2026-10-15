@@ -16,6 +16,22 @@ def is_admin() -> bool:
     except Exception:
         return False
 
+def _build_elevation_args() -> tuple[str, str, str]:
+    """统一构建 UAC 提权执行参数，精确支持源码模式与 PyInstaller 打包模式"""
+    clean_args = [arg for arg in sys.argv[1:] if arg != "--no-elevate"]
+    params = subprocess.list2cmdline(clean_args)
+    is_frozen = getattr(sys, "frozen", False)
+    if is_frozen:
+        target_exe = sys.executable
+        script_dir = os.path.dirname(sys.executable)
+        args_str = params
+    else:
+        target_exe = sys.executable
+        script = os.path.abspath(sys.argv[0])
+        script_dir = os.path.dirname(script)
+        args_str = f'"{script}" {params}'.strip() if params else f'"{script}"'
+    return target_exe, args_str, script_dir
+
 def auto_elevate() -> bool:
     """
     在程序启动时自动申请 UAC 提权。
@@ -31,16 +47,14 @@ def auto_elevate() -> bool:
         return False
 
     try:
-        script = os.path.abspath(sys.argv[0])
-        script_dir = os.path.dirname(script)
-        params = subprocess.list2cmdline(sys.argv[1:])
+        target_exe, args_str, script_dir = _build_elevation_args()
         
         # 申请 UAC 提权重新拉起程序
         ret = ctypes.windll.shell32.ShellExecuteW(
             None,
             "runas",
-            sys.executable,
-            f'"{script}" {params}'.strip(),
+            target_exe,
+            args_str,
             script_dir,
             1  # SW_SHOWNORMAL
         )
@@ -58,16 +72,13 @@ def restart_as_admin() -> bool:
     if is_admin():
         return True
     try:
-        script = os.path.abspath(sys.argv[0])
-        script_dir = os.path.dirname(script)
-        clean_args = [arg for arg in sys.argv[1:] if arg != "--no-elevate"]
-        params = subprocess.list2cmdline(clean_args)
+        target_exe, args_str, script_dir = _build_elevation_args()
         
         ret = ctypes.windll.shell32.ShellExecuteW(
             None,
             "runas",
-            sys.executable,
-            f'"{script}" {params}'.strip(),
+            target_exe,
+            args_str,
             script_dir,
             1
         )

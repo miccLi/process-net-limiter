@@ -7,6 +7,7 @@
 - 提供结构化诊断报告与平滑共存建议
 """
 import re
+import socket
 import ipaddress
 import logging
 import psutil
@@ -85,7 +86,8 @@ class NetworkCompatManager:
 
                 for snic in snic_list:
                     # 仅检测 IPv4
-                    if snic.family.name in ("AF_INET", "2"):
+                    fam_name = getattr(snic.family, "name", str(snic.family))
+                    if fam_name in ("AF_INET", "2") or snic.family == socket.AF_INET:
                         ip_str = snic.address
                         try:
                             ip_obj = ipaddress.ip_address(ip_str)

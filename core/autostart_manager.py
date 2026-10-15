@@ -103,7 +103,7 @@ def set_autostart(enable: bool) -> tuple[bool, str]:
                 creationflags=CREATE_NO_WINDOW,
                 timeout=10
             )
-            if res.returncode == 0 or "cannot find" in (res.stderr or "").lower():
+            if res.returncode == 0 or not is_autostart_enabled():
                 return True, "Success"
             else:
                 err = (res.stderr or res.stdout or "").strip()

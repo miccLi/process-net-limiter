@@ -139,7 +139,16 @@ class SystemTrayManager(QSystemTrayIcon):
         self.action_exit.triggered.connect(self._on_exit_clicked)
         self.menu.addAction(self.action_exit)
 
+        # 菜单即将展现时动态刷新条目状态
+        self.menu.aboutToShow.connect(self._on_menu_about_to_show)
         self.setContextMenu(self.menu)
+
+    def _on_menu_about_to_show(self):
+        """当托盘菜单即将弹出时，动态刷新窗口显示状态、引擎状态与开机自启复选状态"""
+        self.update_visibility_action()
+        self.action_autostart.setChecked(is_autostart_enabled())
+        engine_name = self.main_window.engine.active_engine_display if hasattr(self.main_window, "engine") else "Active"
+        self.action_engine.setText(f"⚙️ {engine_name}")
 
     def retranslate_ui(self):
         """动态更新托盘菜单文字与悬停提示"""

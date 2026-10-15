@@ -451,7 +451,7 @@ class WinDivertEngine:
                 self._scan_and_update_ports()
             except Exception:
                 pass
-            time.sleep(0.3)
+            self._stop_event.wait(timeout=0.3)
 
     def _pacer_loop(self):
         """
@@ -559,7 +559,7 @@ class WinDivertEngine:
                     if allowed:
                         divert.send(packet)
                     else:
-                        if wait_sec > 0 and wait_sec <= 0.05:
+                        if wait_sec > 0 and wait_sec <= bucket.max_pacing_delay:
                             # 将延迟数据包异步推送到 Pacer 优先队列，收包线程绝不等待！
                             with self._pacer_cond:
                                 if len(self._pacer_heap) < 300:
